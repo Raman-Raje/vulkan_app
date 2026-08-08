@@ -1,0 +1,73 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 42
+; Schema: 0
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
+               OpExecutionMode %main LocalSize 16 16 1
+               OpSource GLSL 450
+               OpName %main "main"
+               OpName %pixelCoords "pixelCoords"
+               OpName %gl_GlobalInvocationID "gl_GlobalInvocationID"
+               OpName %pixelA "pixelA"
+               OpName %imageA "imageA"
+               OpName %pixelB "pixelB"
+               OpName %imageB "imageB"
+               OpName %imageOut "imageOut"
+               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+               OpDecorate %imageA DescriptorSet 0
+               OpDecorate %imageA Binding 0
+               OpDecorate %imageB DescriptorSet 0
+               OpDecorate %imageB Binding 1
+               OpDecorate %imageOut DescriptorSet 0
+               OpDecorate %imageOut Binding 2
+               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+      %v2int = OpTypeVector %int 2
+%_ptr_Function_v2int = OpTypePointer Function %v2int
+       %uint = OpTypeInt 32 0
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
+     %v2uint = OpTypeVector %uint 2
+      %float = OpTypeFloat 32
+    %v4float = OpTypeVector %float 4
+%_ptr_Function_v4float = OpTypePointer Function %v4float
+         %22 = OpTypeImage %float 2D 0 0 0 2 Rgba32f
+%_ptr_UniformConstant_22 = OpTypePointer UniformConstant %22
+     %imageA = OpVariable %_ptr_UniformConstant_22 UniformConstant
+     %imageB = OpVariable %_ptr_UniformConstant_22 UniformConstant
+   %imageOut = OpVariable %_ptr_UniformConstant_22 UniformConstant
+    %uint_16 = OpConstant %uint 16
+     %uint_1 = OpConstant %uint 1
+%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_16 %uint_16 %uint_1
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+%pixelCoords = OpVariable %_ptr_Function_v2int Function
+     %pixelA = OpVariable %_ptr_Function_v4float Function
+     %pixelB = OpVariable %_ptr_Function_v4float Function
+         %15 = OpLoad %v3uint %gl_GlobalInvocationID
+         %16 = OpVectorShuffle %v2uint %15 %15 0 1
+         %17 = OpBitcast %v2int %16
+               OpStore %pixelCoords %17
+         %25 = OpLoad %22 %imageA
+         %26 = OpLoad %v2int %pixelCoords
+         %27 = OpImageRead %v4float %25 %26
+               OpStore %pixelA %27
+         %30 = OpLoad %22 %imageB
+         %31 = OpLoad %v2int %pixelCoords
+         %32 = OpImageRead %v4float %30 %31
+               OpStore %pixelB %32
+         %34 = OpLoad %22 %imageOut
+         %35 = OpLoad %v2int %pixelCoords
+         %36 = OpLoad %v4float %pixelA
+         %37 = OpLoad %v4float %pixelB
+         %38 = OpFAdd %v4float %36 %37
+               OpImageWrite %34 %35 %38
+               OpReturn
+               OpFunctionEnd

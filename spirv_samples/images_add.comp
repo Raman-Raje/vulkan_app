@@ -1,0 +1,24 @@
+#version 450
+
+// Define the layout for the compute shader
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Input image A
+layout(set = 0, binding = 0, rgba32f) uniform image2D imageA;
+
+// Input image B
+layout(set = 0, binding = 1, rgba32f) uniform image2D imageB;
+
+// Output image
+layout(set = 0, binding = 2, rgba32f) uniform image2D imageOut;
+
+void main() {
+    ivec2 pixelCoords = ivec2(gl_GlobalInvocationID.xy);
+
+    // Load pixel values from imageA and imageB
+    vec4 pixelA = imageLoad(imageA, pixelCoords);
+    vec4 pixelB = imageLoad(imageB, pixelCoords);
+
+    // Add the pixel values and store the result in imageOut
+    imageStore(imageOut, pixelCoords, pixelA + pixelB);
+}

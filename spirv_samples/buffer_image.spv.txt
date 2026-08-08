@@ -1,0 +1,91 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 56
+; Schema: 0
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
+               OpExecutionMode %main LocalSize 16 16 1
+               OpSource GLSL 450
+               OpName %main "main"
+               OpName %pixelCoords "pixelCoords"
+               OpName %gl_GlobalInvocationID "gl_GlobalInvocationID"
+               OpName %index "index"
+               OpName %value "value"
+               OpName %InputBuffer "InputBuffer"
+               OpMemberName %InputBuffer 0 "inputData"
+               OpName %inputBuffer "inputBuffer"
+               OpName %outputValue "outputValue"
+               OpName %outputImage "outputImage"
+               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+               OpDecorate %_runtimearr_float ArrayStride 4
+               OpMemberDecorate %InputBuffer 0 Offset 0
+               OpDecorate %InputBuffer BufferBlock
+               OpDecorate %inputBuffer DescriptorSet 0
+               OpDecorate %inputBuffer Binding 0
+               OpDecorate %outputImage DescriptorSet 0
+               OpDecorate %outputImage Binding 1
+               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+      %v2int = OpTypeVector %int 2
+%_ptr_Function_v2int = OpTypePointer Function %v2int
+       %uint = OpTypeInt 32 0
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
+     %v2uint = OpTypeVector %uint 2
+%_ptr_Function_int = OpTypePointer Function %int
+     %uint_1 = OpConstant %uint 1
+     %int_16 = OpConstant %int 16
+     %uint_0 = OpConstant %uint 0
+      %float = OpTypeFloat 32
+%_ptr_Function_float = OpTypePointer Function %float
+%_runtimearr_float = OpTypeRuntimeArray %float
+%InputBuffer = OpTypeStruct %_runtimearr_float
+%_ptr_Uniform_InputBuffer = OpTypePointer Uniform %InputBuffer
+%inputBuffer = OpVariable %_ptr_Uniform_InputBuffer Uniform
+      %int_0 = OpConstant %int 0
+%_ptr_Uniform_float = OpTypePointer Uniform %float
+    %v4float = OpTypeVector %float 4
+%_ptr_Function_v4float = OpTypePointer Function %v4float
+    %float_2 = OpConstant %float 2
+         %48 = OpTypeImage %float 2D 0 0 0 2 Rgba32f
+%_ptr_UniformConstant_48 = OpTypePointer UniformConstant %48
+%outputImage = OpVariable %_ptr_UniformConstant_48 UniformConstant
+    %uint_16 = OpConstant %uint 16
+%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_16 %uint_16 %uint_1
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+%pixelCoords = OpVariable %_ptr_Function_v2int Function
+      %index = OpVariable %_ptr_Function_int Function
+      %value = OpVariable %_ptr_Function_float Function
+%outputValue = OpVariable %_ptr_Function_v4float Function
+         %15 = OpLoad %v3uint %gl_GlobalInvocationID
+         %16 = OpVectorShuffle %v2uint %15 %15 0 1
+         %17 = OpBitcast %v2int %16
+               OpStore %pixelCoords %17
+         %21 = OpAccessChain %_ptr_Function_int %pixelCoords %uint_1
+         %22 = OpLoad %int %21
+         %24 = OpIMul %int %22 %int_16
+         %26 = OpAccessChain %_ptr_Function_int %pixelCoords %uint_0
+         %27 = OpLoad %int %26
+         %28 = OpIAdd %int %24 %27
+               OpStore %index %28
+         %37 = OpLoad %int %index
+         %39 = OpAccessChain %_ptr_Uniform_float %inputBuffer %int_0 %37
+         %40 = OpLoad %float %39
+               OpStore %value %40
+         %44 = OpLoad %float %value
+         %46 = OpFMul %float %44 %float_2
+         %47 = OpCompositeConstruct %v4float %46 %46 %46 %46
+               OpStore %outputValue %47
+         %51 = OpLoad %48 %outputImage
+         %52 = OpLoad %v2int %pixelCoords
+         %53 = OpLoad %v4float %outputValue
+               OpImageWrite %51 %52 %53
+               OpReturn
+               OpFunctionEnd

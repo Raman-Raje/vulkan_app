@@ -1,0 +1,29 @@
+#version 450
+
+// Define the layout for the compute shader
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Input storage buffer
+layout(set = 0, binding = 0, std430) buffer InputBuffer {
+    float inputData[];
+} inputBuffer;
+
+// Output image
+layout(set = 0, binding = 1, rgba32f) uniform image2D outputImage;
+
+void main() {
+    // Get the pixel coordinates from the global invocation ID
+    ivec2 pixelCoords = ivec2(gl_GlobalInvocationID.xy);
+
+    // Compute a 1D index from the 2D pixel coordinates
+    int index = pixelCoords.y * 16 + pixelCoords.x;
+
+    // Retrieve the corresponding value from the buffer
+    float value = inputBuffer.inputData[index];
+
+    // Multiply the value by a constant (e.g., 2.0)
+    vec4 outputValue = vec4(value * 2.0);
+
+    // Store the result in the output image
+    imageStore(outputImage, pixelCoords, outputValue);
+}

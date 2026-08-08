@@ -1,0 +1,78 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos; 0
+; Bound: 50
+; Schema: 0
+               OpCapability Shader
+               OpCapability ImageQuery
+               OpExtension "SPV_KHR_storage_buffer_storage_class"
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %16 "tvmgen_default_fused_layout_transform_kernel0" %BuiltInLocalInvocationId %BuiltInWorkgroupId
+               OpExecutionMode %16 LocalSize 25 1 1
+               OpName %T_layout_trans "T_layout_trans"
+               OpName %p0 "p0"
+               OpName %BuiltInWorkgroupId "BuiltInWorkgroupId"
+               OpName %blockIdx_x "blockIdx.x"
+               OpName %BuiltInLocalInvocationId "BuiltInLocalInvocationId"
+               OpName %threadIdx_x "threadIdx.x"
+               OpDecorate %T_layout_trans DescriptorSet 0
+               OpDecorate %T_layout_trans Binding 0
+               OpDecorate %_runtimearr_float ArrayStride 4
+               OpMemberDecorate %_struct_13 0 Offset 0
+               OpDecorate %_struct_13 Block
+               OpDecorate %p0 DescriptorSet 0
+               OpDecorate %p0 Binding 1
+               OpDecorate %BuiltInWorkgroupId BuiltIn WorkgroupId
+               OpDecorate %BuiltInLocalInvocationId BuiltIn LocalInvocationId
+        %int = OpTypeInt 32 1
+       %uint = OpTypeInt 32 0
+       %bool = OpTypeBool
+      %float = OpTypeFloat 32
+      %int_0 = OpConstant %int 0
+       %void = OpTypeVoid
+          %8 = OpTypeFunction %void
+          %9 = OpTypeImage %float 2D 0 0 0 0 Rgba32f
+%_ptr_UniformConstant_9 = OpTypePointer UniformConstant %9
+%T_layout_trans = OpVariable %_ptr_UniformConstant_9 UniformConstant
+%_runtimearr_float = OpTypeRuntimeArray %float
+ %_struct_13 = OpTypeStruct %_runtimearr_float
+%_ptr_StorageBuffer__struct_13 = OpTypePointer StorageBuffer %_struct_13
+         %p0 = OpVariable %_ptr_StorageBuffer__struct_13 StorageBuffer
+      %v3int = OpTypeVector %int 3
+%_ptr_Input_v3int = OpTypePointer Input %v3int
+%BuiltInWorkgroupId = OpVariable %_ptr_Input_v3int Input
+%_ptr_Input_int = OpTypePointer Input %int
+%BuiltInLocalInvocationId = OpVariable %_ptr_Input_v3int Input
+      %int_5 = OpConstant %int 5
+%_ptr_StorageBuffer_float = OpTypePointer StorageBuffer %float
+     %int_25 = OpConstant %int 25
+     %int_50 = OpConstant %int 50
+     %int_75 = OpConstant %int 75
+    %v4float = OpTypeVector %float 4
+      %v2int = OpTypeVector %int 2
+         %16 = OpFunction %void None %8
+         %17 = OpLabel
+         %22 = OpAccessChain %_ptr_Input_int %BuiltInWorkgroupId %int_0
+ %blockIdx_x = OpLoad %int %22
+         %25 = OpAccessChain %_ptr_Input_int %BuiltInLocalInvocationId %int_0
+%threadIdx_x = OpLoad %int %25
+         %28 = OpSRem %int %threadIdx_x %int_5
+         %29 = OpSDiv %int %threadIdx_x %int_5
+         %31 = OpInBoundsAccessChain %_ptr_StorageBuffer_float %p0 %int_0 %threadIdx_x
+         %32 = OpLoad %float %31 None
+         %34 = OpIAdd %int %threadIdx_x %int_25
+         %35 = OpInBoundsAccessChain %_ptr_StorageBuffer_float %p0 %int_0 %34
+         %36 = OpLoad %float %35 None
+         %38 = OpIAdd %int %threadIdx_x %int_50
+         %39 = OpInBoundsAccessChain %_ptr_StorageBuffer_float %p0 %int_0 %38
+         %40 = OpLoad %float %39 None
+         %42 = OpIAdd %int %threadIdx_x %int_75
+         %43 = OpInBoundsAccessChain %_ptr_StorageBuffer_float %p0 %int_0 %42
+         %44 = OpLoad %float %43 None
+         %46 = OpCompositeConstruct %v4float %32 %36 %40 %44
+         %48 = OpCompositeConstruct %v2int %28 %29
+         %49 = OpLoad %9 %T_layout_trans
+               OpImageWrite %49 %48 %46
+               OpReturn
+               OpFunctionEnd

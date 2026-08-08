@@ -1,0 +1,26 @@
+#version 450
+
+// Define the layout for the compute shader
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// Input buffer A
+layout(set = 0, binding = 0, std430) buffer BufferA {
+    float data[];
+} bufferA;
+
+// Input buffer B
+layout(set = 0, binding = 1, std430) buffer BufferB {
+    float data[];
+} bufferB;
+
+// Output buffer
+layout(set = 0, binding = 2, std430) buffer BufferOut {
+    float data[];
+} bufferOut;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Add corresponding elements from bufferA and bufferB
+    bufferOut.data[idx] = bufferA.data[idx] + bufferB.data[idx];
+}

@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x = 25, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 1, std430) buffer p0
+{
+    float _m0[];
+} p0_1;
+
+layout(set = 0, binding = 0) uniform texture2D T_layout_trans;
+
+void main()
+{
+    imageStore(T_layout_trans, ivec2(int(gl_LocalInvocationID.x) - 5 * (int(gl_LocalInvocationID.x) / 5), int(gl_LocalInvocationID.x) / 5), vec4(p0_1._m0[int(gl_LocalInvocationID.x)], p0_1._m0[int(gl_LocalInvocationID.x) + 25], p0_1._m0[int(gl_LocalInvocationID.x) + 50], p0_1._m0[int(gl_LocalInvocationID.x) + 75]));
+}
+
