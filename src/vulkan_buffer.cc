@@ -1,10 +1,12 @@
-#include <iostream>
-#include "vulkan_buffer.h"
+#include "vulkan_app/vulkan_buffer.h"
+
+#include <cstring>
+#include <stdexcept>
 
 namespace vulkan {
 
 VulkanBuffer::VulkanBuffer(VkDevice device, VkPhysicalDevice physicalDevice, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties)
-    : device(device), buffer(VK_NULL_HANDLE), bufferMemory(VK_NULL_HANDLE) {
+    : device(device), buffer(VK_NULL_HANDLE), bufferMemory(VK_NULL_HANDLE), size(size) {
     createBuffer(device, physicalDevice, size, usage, properties);
 }
 
@@ -65,6 +67,42 @@ VkBuffer VulkanBuffer::getBuffer() const {
 
 VkDeviceMemory VulkanBuffer::getBufferMemory() const {
     return bufferMemory;
+}
+
+VkDeviceSize VulkanBuffer::getSize() const {
+    return size;
+}
+
+void VulkanBuffer::upload(const void* data, VkDeviceSize copySize) {
+    if (copySize == VK_WHOLE_SIZE) {
+        copySize = size;
+    }
+    if (copySize > size) {
+        throw std::runtime_error("upload size exceeds buffer size!");
+    }
+
+    void* mapped;
+    if (vkMapMemory(device, bufferMemory, 0, copySize, 0, &mapped) != VK_SUCCESS) {
+        throw std::runtime_error("failed to map buffer memory!");
+    }
+    std::memcpy(mapped, data, static_cast<size_t>(copySize));
+    vkUnmapMemory(device, bufferMemory);
+}
+
+void VulkanBuffer::download(void* data, VkDeviceSize copySize) const {
+    if (copySize == VK_WHOLE_SIZE) {
+        copySize = size;
+    }
+    if (copySize > size) {
+        throw std::runtime_error("download size exceeds buffer size!");
+    }
+
+    void* mapped;
+    if (vkMapMemory(device, bufferMemory, 0, copySize, 0, &mapped) != VK_SUCCESS) {
+        throw std::runtime_error("failed to map buffer memory!");
+    }
+    std::memcpy(data, mapped, static_cast<size_t>(copySize));
+    vkUnmapMemory(device, bufferMemory);
 }
 
 } // namespace vulkan

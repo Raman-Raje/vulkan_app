@@ -1,4 +1,4 @@
-#include "vulkan_device.h"
+#include "vulkan_app/vulkan_device.h"
 #include <iostream>
 #include <string.h>
 #include <vector>
@@ -46,6 +46,12 @@ void VulkanDevice::createInstance() {
     auto extensions = getRequiredExtensions();
     createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     createInfo.ppEnabledExtensionNames = extensions.data();
+
+#ifdef __APPLE__
+    // MoltenVK is a portability driver, so the loader only enumerates it when
+    // the instance opts in.
+    createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
 
     if (enableValidationLayers) {
         createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
@@ -124,6 +130,14 @@ void VulkanDevice::createLogicalDevice() {
         throw std::runtime_error("required device extensions are not supported!");
     }
 
+    // A portability driver (e.g. MoltenVK) requires this extension to be enabled
+    // whenever it advertises it. Spelled out rather than using the header macro,
+    // which is only visible with VK_ENABLE_BETA_EXTENSIONS.
+    const char* kPortabilitySubset = "VK_KHR_portability_subset";
+    if (checkDeviceExtensionSupport(physicalDevice, { kPortabilitySubset })) {
+        requiredExtensions.push_back(kPortabilitySubset);
+    }
+
 
     VkDeviceCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -161,6 +175,10 @@ VkInstance VulkanDevice::getInstance() const {
 
 VkQueue VulkanDevice::getComputeQueue() const {
     return computeQueue;
+}
+
+uint32_t VulkanDevice::getComputeQueueFamilyIndex() const {
+    return computeQueueFamilyIndex;
 }
 
 VkCommandPool VulkanDevice::getCommandPool() const {
@@ -212,6 +230,13 @@ std::vector<const char*> VulkanDevice::getRequiredExtensions() {
     if (enableValidationLayers) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
+
+#ifdef __APPLE__
+    extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    // Required by the VK_KHR_portability_subset device extension that
+    // createLogicalDevice() enables on portability drivers.
+    extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+#endif
 
     return extensions;
 }

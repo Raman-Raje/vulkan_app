@@ -1,145 +1,120 @@
-#include <cstring>
+// Reads a storage buffer, doubles each value and writes it into an rgba32f image.
+
 #include <iostream>
 #include <vector>
-#include <vulkan/vulkan_core.h>
-#include "vulkan_buffer.h"
-#include "vulkan_image.h"
-#include "vulkan_device.h"
-#include "vulkan_utils.h"
-#include "vulkan_pipeline.h"
-#include "vulkan_command_buffer.h"
+
+#include "vulkan_app/vulkan_buffer.h"
+#include "vulkan_app/vulkan_command_buffer.h"
+#include "vulkan_app/vulkan_device.h"
+#include "vulkan_app/vulkan_image.h"
+#include "vulkan_app/vulkan_pipeline.h"
+#include "vulkan_app/vulkan_utils.h"
+
+#include "example_utils.h"
 
 using namespace vulkan;
 
-int main() {
-
+int main(int argc, char** argv) try {
     // Step 1: Initialize VulkanDevice
     VulkanDevice vulkanDevice(true); // Enable validation layers
 
-    // Step 2: Create Buffers
     VkDevice device = vulkanDevice.getDevice();
     VkPhysicalDevice physicalDevice = vulkanDevice.getPhysicalDevice();
+    VkCommandPool commandPool = vulkanDevice.getCommandPool();
+    VkQueue queue = vulkanDevice.getComputeQueue();
 
-    // image size
+    // Step 2: Sizes. The shader indexes the buffer as `y * 16 + x` over a
+    // 16x16 workgroup, so the image is 16x16 and the buffer holds 256 floats.
+    const uint32_t width = 16, height = 16, channels = 4;
+    const size_t bufferElementCount = width * height;
+    const VkDeviceSize bufferByteSize = bufferElementCount * sizeof(float);
+    const size_t imageElementCount = width * height * channels;
+    const VkDeviceSize imageByteSize = imageElementCount * sizeof(float);
 
-    const int height = 4, width = 4, channel = 4, length = 1024;
-    VkDeviceSize imageSize = height * width * channel * sizeof(float);
-    VkDeviceSize bufferSize = length * sizeof(float);
+    VulkanBuffer inputBuffer(device, physicalDevice, bufferByteSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-    // create input buffer
-    VulkanBuffer inputBuffer(device,physicalDevice, bufferSize,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT); 
+    VulkanImage imageOut(device, physicalDevice, width, height, VK_FORMAT_R32G32B32A32_SFLOAT,
+                         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    // create output image
-    VulkanImage imageOut(device, physicalDevice, width, height, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);    
+    const std::vector<float> inputData(bufferElementCount, 1.0f);
+    inputBuffer.upload(inputData.data());
 
+    // The image must be in GENERAL layout to be used as a storage image.
+    VulkanUtils::transitionImageLayout(device, commandPool, queue, imageOut.getImage(),
+                                      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
 
-    // Fill buffer with data
-    std::vector<float> inputDataB(bufferSize, 1.0f); // Fill with 1.0f
-
-    // Map the data to buffer
-    void* mappedData;
-    vkMapMemory(device, inputBuffer.getBufferMemory(), 0, imageSize, 0, &mappedData);
-    std::memcpy(mappedData, inputDataB.data(), static_cast<size_t>(bufferSize));
-    vkUnmapMemory(device, inputBuffer.getBufferMemory());
-
-
-    // Pipeline creation
+    // Step 3: Create the compute pipeline
     VulkanPipeline vulkanPipeline(device);
 
-    // Define Descriptor Set Layout Bindings for bufferA, bufferB, and bufferOut
     std::vector<VkDescriptorSetLayoutBinding> bindings = {
-        { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, 
-        { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },  // bufferB
+        { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },  // inputBuffer
+        { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },   // imageOut
     };
-    vulkanPipeline.createDescriptorSetLayout(bindings); 
+    vulkanPipeline.createDescriptorSetLayout(bindings);
+    vulkanPipeline.createPipeline(example::shaderPath("buffer_image.spv", argc, argv), "main");
 
-    // Create pipeline with the buffer addition shader
-    vulkanPipeline.createPipeline("/local/mnt/workspace/ramashin/tests/vulkan/testSpirv/spirv/buffer_image.spv", "main");
-
-    //Allocate Descriptor Set and Update with Resources
+    // Step 4: Allocate the descriptor set and point it at the resources
     std::vector<VkDescriptorPoolSize> poolSizes = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },  // 3 buffers (bufferA, bufferB, bufferOut)
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }  // 3 buffers (bufferA, bufferB, bufferOut)
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }
     };
     vulkanPipeline.createDescriptorPool(poolSizes);
+    VkDescriptorSet descriptorSet = vulkanPipeline.allocateDescriptorSet(vulkanPipeline.getDescriptorPool());
 
-  VkDescriptorSet descriptorSet = vulkanPipeline.allocateDescriptorSet(vulkanPipeline.getDescriptorPool());
-
-    // Create descriptor buffer info struct
-    VkDescriptorBufferInfo bufferInfo = {};
-    bufferInfo.buffer = inputBuffer.getBuffer();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    // Create descriptor image info struct
-    VkDescriptorImageInfo imageInfo = {};
-    imageInfo.imageView = imageOut.getImageView();
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkDescriptorBufferInfo bufferInfo = { inputBuffer.getBuffer(), 0, VK_WHOLE_SIZE };
+    VkDescriptorImageInfo imageInfo = { VK_NULL_HANDLE, imageOut.getImageView(), VK_IMAGE_LAYOUT_GENERAL };
 
     std::vector<VkWriteDescriptorSet> descriptorWrites = {
         { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, descriptorSet, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bufferInfo, nullptr },
         { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, descriptorSet, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &imageInfo, nullptr, nullptr },
     };
-
     vulkanPipeline.updateDescriptorSet(descriptorSet, descriptorWrites);
 
-    // Step 5: Record Command Buffer and Dispatch Compute Shader
-    VulkanCommandBuffer commandBuffer(device, vulkanDevice.getCommandPool());
+    // Step 5: Record and submit the dispatch. One 16x16 workgroup covers the image.
+    VulkanCommandBuffer commandBuffer(device, commandPool);
     commandBuffer.beginRecording();
-
-    commandBuffer.beginRecording();
-
-    // Transition the output image to GENERAL layout for read/write access in the shader
-    VulkanUtils::transitionImageLayout(device, vulkanDevice.getCommandPool(), vulkanDevice.getComputeQueue(),
-                                       imageOut.getImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-                                       
-    // Dispatch the compute shader
-    commandBuffer.dispatchCompute(vulkanPipeline.getPipeline(), vulkanPipeline.getPipelineLayout(), descriptorSet, bufferSize / 256, 1, 1);  // Adjust workgroup size as needed
-
+    commandBuffer.dispatchCompute(vulkanPipeline.getPipeline(), vulkanPipeline.getPipelineLayout(),
+                                  descriptorSet, 1, 1, 1);
     commandBuffer.endRecording();
+    commandBuffer.submit(queue);
 
-    // Submit the command buffer
-    commandBuffer.submit(vulkanDevice.getComputeQueue());
+    // Step 6: Read back the image and verify
+    VulkanUtils::transitionImageLayout(device, commandPool, queue, imageOut.getImage(),
+                                      VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
-    // Step 6: Verify the Results
-    // Transition the output image layout to TRANSFER_SRC_OPTIMAL for copying to buffer
-    VulkanUtils::transitionImageLayout(device, vulkanDevice.getCommandPool(), vulkanDevice.getComputeQueue(),
-                                       imageOut.getImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
-    // Create a staging buffer to copy the image data back to the CPU
-    VulkanBuffer stagingBuffer(device, physicalDevice, imageSize,
+    VulkanBuffer stagingBuffer(device, physicalDevice, imageByteSize,
                                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VulkanUtils::copyImageToBuffer(device, commandPool, queue, imageOut.getImage(),
+                                   stagingBuffer.getBuffer(), width, height);
 
-    // Copy the image data to the staging buffer
-    VulkanUtils::copyImageToBuffer(device, vulkanDevice.getCommandPool(), vulkanDevice.getComputeQueue(),
-                                   imageOut.getImage(), stagingBuffer.getBuffer(), width, height);
+    std::vector<float> outputData(imageElementCount);
+    stagingBuffer.download(outputData.data());
 
-    // Map the staging buffer and read back the data
-    vkMapMemory(device, stagingBuffer.getBufferMemory(), 0, imageSize, 0, &mappedData);
-
-    // Print or verify the transformed data
     bool success = true;
-    float* outputData = static_cast<float*>(mappedData);
-    for (int i = 0; i < width * height * channel; i += 4) {
-        float expectedValue = 2.0f; // input value (1.0) * 2.0 from shader
+    for (size_t i = 0; i < imageElementCount; i += channels) {
+        const float expectedValue = 2.0f;  // input value (1.0) * 2.0 in the shader
         if (outputData[i] != expectedValue || outputData[i + 1] != expectedValue ||
             outputData[i + 2] != expectedValue || outputData[i + 3] != expectedValue) {
-            std::cerr << "Mismatch at index " << i / 4 << ": expected (" << expectedValue << "), got ("
-                      << outputData[i] << ", " << outputData[i + 1] << ", " << outputData[i + 2] << ", "
-                      << outputData[i + 3] << ")" << std::endl;
+            std::cerr << "Mismatch at pixel " << i / channels << ": expected (" << expectedValue
+                      << "), got (" << outputData[i] << ", " << outputData[i + 1] << ", "
+                      << outputData[i + 2] << ", " << outputData[i + 3] << ")" << std::endl;
             success = false;
+            break;
         }
     }
 
-    vkUnmapMemory(device, stagingBuffer.getBufferMemory());
+    if (!success) {
+        std::cerr << "Test failed: some values are incorrect." << std::endl;
+        return EXIT_FAILURE;
+    }
 
-    if (success) {
-        std::cout << "Test passed: all values are correct." << std::endl;
-    } else {
-        std::cout << "Test failed: some values are incorrect." << std::endl;
-    }     
+    std::cout << "Test passed: all values are correct." << std::endl;
+    return EXIT_SUCCESS;
 
-    return 0;
-
+} catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+    return EXIT_FAILURE;
 }

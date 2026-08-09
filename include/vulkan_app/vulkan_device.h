@@ -16,6 +16,7 @@ public:
     VkPhysicalDevice getPhysicalDevice() const;
     VkInstance getInstance() const;
     VkQueue getComputeQueue() const;
+    uint32_t getComputeQueueFamilyIndex() const;
     VkCommandPool createCommandPool();
     VkCommandPool getCommandPool() const;
 

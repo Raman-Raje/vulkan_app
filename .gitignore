@@ -1,0 +1,13 @@
+# Build output
+build/
+compile_commands.json
+
+# Compiled binaries (examples are built by CMake)
+*.o
+*.a
+*.so
+*.dylib
+
+# Editor / OS noise
+.cache/
+.DS_Store
