@@ -1,0 +1,31 @@
+#version 450
+
+// A workload with a cost proportional to `iterations`, used to verify that
+// VulkanTimer measures real GPU execution time.
+//
+// Two details keep the compiler from optimizing the cost away:
+//   - the loop bound comes from a buffer, so it cannot be unrolled or folded;
+//   - each step depends on the previous one, so the chain cannot be
+//     vectorized, reordered into parallel work, or eliminated as dead.
+// The coefficients converge instead of diverging, so the accumulator stays
+// finite no matter how many iterations run.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer Params {
+    uint iterations;
+} params;
+
+layout(set = 0, binding = 1, std430) buffer Data {
+    float values[];
+} data;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    float acc = data.values[idx];
+    for (uint i = 0u; i < params.iterations; ++i) {
+        acc = acc * 0.9999999 + 0.5;
+    }
+    data.values[idx] = acc;
+}

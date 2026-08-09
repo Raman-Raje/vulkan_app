@@ -3,11 +3,7 @@
 
 #include <string>
 
-// Set by CMake to <repo>/shaders/spv; the fallback keeps the header usable when
-// an example is compiled by hand from the repository root.
-#ifndef VULKAN_APP_SHADER_DIR
-#define VULKAN_APP_SHADER_DIR "shaders/spv"
-#endif
+#include "vulkan_app/shader_path.h"
 
 namespace example {
 
@@ -17,7 +13,7 @@ inline std::string shaderPath(const std::string& name, int argc, char** argv) {
     if (argc > 1) {
         return std::string(argv[1]);
     }
-    return std::string(VULKAN_APP_SHADER_DIR) + "/" + name;
+    return vulkan::shaderPath(name);
 }
 
 } // namespace example

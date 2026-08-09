@@ -10,6 +10,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(VULKAN_APP_BUILD_EXAMPLES "Build the example programs" ON)
+option(VULKAN_APP_BUILD_TESTS "Build the tests" ON)
 
 find_package(Vulkan REQUIRED)
 
@@ -39,6 +40,11 @@ target_compile_definitions(vulkan_app PUBLIC
 
 if(VULKAN_APP_BUILD_EXAMPLES)
   add_subdirectory(examples)
+endif()
+
+if(VULKAN_APP_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
 endif()
 
 install(TARGETS vulkan_app ARCHIVE DESTINATION lib)
