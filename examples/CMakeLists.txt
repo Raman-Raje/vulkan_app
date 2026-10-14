@@ -4,6 +4,7 @@ set(VULKAN_APP_EXAMPLES
   image_add
   buffer_image
   layout_transform
+  gemm_coopmat
 )
 
 foreach(example IN LISTS VULKAN_APP_EXAMPLES)

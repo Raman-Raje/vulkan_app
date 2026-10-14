@@ -1,0 +1,66 @@
+#version 450
+// ---------------------------------------------------------------------------
+// GEMM  C = A * B  using KHR cooperative matrix — plain "K-first" layout
+//
+//   A : M x K, row-major            addr(m,k) = m*K + k
+//   B : K x N, stored K-first       addr(k,n) = n*K + k   (i.e. B^T row-major)
+//   C : M x N, row-major            addr(m,n) = m*N + n
+//
+// One subgroup (= one workgroup) computes one TILE_M x TILE_N tile of C.
+// Dispatch: vkCmdDispatch(N / TILE_N, M / TILE_M, 1)
+// Requires M % TILE_M == 0, N % TILE_N == 0, K % TILE_K == 0 (no edge handling).
+// ---------------------------------------------------------------------------
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+// Change these to a combination reported by
+// vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR on your device.
+#define A_TYPE float16_t
+#define C_TYPE float16_t
+
+// Spec constant 0 = subgroup size (one subgroup per workgroup).
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = 1) const uint TILE_M = 16;
+layout(constant_id = 2) const uint TILE_N = 16;
+layout(constant_id = 3) const uint TILE_K = 16;
+
+layout(push_constant) uniform PC { uint M; uint N; uint K; } pc;
+
+layout(set = 0, binding = 0) readonly  buffer BufA { A_TYPE a[]; };
+layout(set = 0, binding = 1) readonly  buffer BufB { A_TYPE b[]; };
+layout(set = 0, binding = 2) writeonly buffer BufC { C_TYPE c[]; };
+
+void main()
+{
+    const uint row = gl_WorkGroupID.y * TILE_M;   // first row of this C tile
+    const uint col = gl_WorkGroupID.x * TILE_N;   // first column of this C tile
+
+    coopmat<C_TYPE, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator> acc =
+        coopmat<C_TYPE, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator>(C_TYPE(0.0));
+
+    for (uint step = 0; step < pc.K; step += TILE_K)
+    {
+        // A tile: rows [row, row+TILE_M), k [step, step+TILE_K)
+        // Each row of the tile is TILE_K contiguous values, rows are K apart.
+        coopmat<A_TYPE, gl_ScopeSubgroup, TILE_M, TILE_K, gl_MatrixUseA> matA;
+        coopMatLoad(matA, a,
+                    row * pc.K + step,          // element
+                    pc.K,                       // stride = TOTAL_K  (large!)
+                    gl_CooperativeMatrixLayoutRowMajor);
+
+        // B tile: k [step, step+TILE_K), cols [col, col+TILE_N)
+        // Each column is TILE_K contiguous values, columns are K apart.
+        coopmat<A_TYPE, gl_ScopeSubgroup, TILE_K, TILE_N, gl_MatrixUseB> matB;
+        coopMatLoad(matB, b,
+                    col * pc.K + step,          // element
+                    pc.K,                       // stride = TOTAL_K  (large!)
+                    gl_CooperativeMatrixLayoutColumnMajor);
+
+        acc = coopMatMulAdd(matA, matB, acc);
+    }
+
+    coopMatStore(acc, c, row * pc.N + col, pc.N, gl_CooperativeMatrixLayoutRowMajor);
+}

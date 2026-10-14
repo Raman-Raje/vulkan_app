@@ -12,7 +12,11 @@ public:
     VulkanPipeline(VkDevice device);
     ~VulkanPipeline();
 
-    void createPipeline(const std::string& shaderPath,const std::string& entry_point);
+    void createPipeline(const std::string& shaderPath, const std::string& entry_point,
+                         const std::vector<VkSpecializationMapEntry>& specEntries = {},
+                         const void* specData = nullptr, size_t specDataSize = 0,
+                         const std::vector<VkPushConstantRange>& pushConstantRanges = {},
+                         uint32_t requiredSubgroupSize = 0);
     VkPipeline getPipeline() const;
     VkPipelineLayout getPipelineLayout() const;
 

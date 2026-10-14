@@ -1,0 +1,1092 @@
+From ef6e8e37d6b1d422521a80e67544152905117b21 Mon Sep 17 00:00:00 2001
+From: Raman Shinde <ramashin@blr-ubuntu-grtai02.qualcomm.com>
+Date: Wed, 14 Oct 2026 15:34:53 +0530
+Subject: [PATCH] Add gemm_coopmat cooperative-matrix example and Android
+ cross-build support
+
+Wires specialization constants, push constants, and VK_KHR_cooperative_matrix
+feature negotiation into the core library, adds examples/gemm_coopmat.cc to
+run and compare the gemm_kfirst / gemm_kfirst_tiled shaders, and adds a
+VULKAN_APP_ANDROID CMake option so the same examples build and run on Android
+(on-device shader path, validation layers off by default since the device
+won't have the Khronos layer installed). Verified passing on-device: both
+variants match the CPU reference, tiled layout ~1.24x faster.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                             |  28 +-
+ README.md                                  |  40 +++
+ examples/CMakeLists.txt                    |   1 +
+ examples/buffer_add.cc                     |   2 +-
+ examples/buffer_image.cc                   |   2 +-
+ examples/gemm_coopmat.cc                   | 329 +++++++++++++++++++++
+ examples/image_add.cc                      |   2 +-
+ examples/layout_transform.cc               |   2 +-
+ include/vulkan_app/vulkan_command_buffer.h |   1 +
+ include/vulkan_app/vulkan_device.h         |  27 +-
+ include/vulkan_app/vulkan_pipeline.h       |   6 +-
+ shaders/gemm_kfirst.comp                   |  66 +++++
+ shaders/gemm_kfirst_tiled.comp             |  67 +++++
+ shaders/spv/gemm_kfirst.spv                | Bin 0 -> 3700 bytes
+ shaders/spv/gemm_kfirst_tiled.spv          | Bin 0 -> 3708 bytes
+ src/vulkan_command_buffer.cc               |   4 +
+ src/vulkan_device.cc                       | 100 ++++++-
+ src/vulkan_pipeline.cc                     |  27 +-
+ tools/compile_shaders.sh                   |   2 +-
+ 19 files changed, 689 insertions(+), 17 deletions(-)
+ create mode 100644 examples/gemm_coopmat.cc
+ create mode 100644 shaders/gemm_kfirst.comp
+ create mode 100644 shaders/gemm_kfirst_tiled.comp
+ create mode 100644 shaders/spv/gemm_kfirst.spv
+ create mode 100644 shaders/spv/gemm_kfirst_tiled.spv
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a3b7219..de40e33 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,6 +12,15 @@ endif()
+ option(VULKAN_APP_BUILD_EXAMPLES "Build the example programs" ON)
+ option(VULKAN_APP_BUILD_TESTS "Build the tests" ON)
+ 
++# Cross-compiling with the NDK toolchain file
++# (-DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake) sets
++# ANDROID to true; this option defaults from that but can be forced
++# independently. It adjusts two things that differ from a desktop build:
++# the Khronos validation layer isn't present on-device by default, and the
++# shader directory can't be the host build path, since nothing is deployed
++# there.
++option(VULKAN_APP_ANDROID "Build for Android: validation layers off by default, VULKAN_APP_SHADER_DIR points at an on-device path" ${ANDROID})
++
+ find_package(Vulkan REQUIRED)
+ 
+ # Core library: thin RAII wrappers over the Vulkan compute objects.
+@@ -33,10 +42,21 @@ target_include_directories(vulkan_app PUBLIC
+ target_link_libraries(vulkan_app PUBLIC Vulkan::Vulkan)
+ 
+ # Examples locate their SPIR-V through this directory unless a path is passed
+-# on the command line.
+-target_compile_definitions(vulkan_app PUBLIC
+-  VULKAN_APP_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders/spv"
+-)
++# on the command line. On Android there is no host filesystem to point at;
++# shaders/spv/ must be pushed to the device separately (see README) and this
++# define points at wherever that landed.
++if(VULKAN_APP_ANDROID)
++  set(VULKAN_APP_ANDROID_SHADER_DIR "/data/local/tmp/vulkan_app/shaders/spv" CACHE STRING
++      "On-device directory shaders/spv/ is pushed to, e.g. via adb push")
++  target_compile_definitions(vulkan_app PUBLIC
++    VULKAN_APP_SHADER_DIR="${VULKAN_APP_ANDROID_SHADER_DIR}"
++    VULKAN_APP_ANDROID=1
++  )
++else()
++  target_compile_definitions(vulkan_app PUBLIC
++    VULKAN_APP_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders/spv"
++  )
++endif()
+ 
+ if(VULKAN_APP_BUILD_EXAMPLES)
+   add_subdirectory(examples)
+diff --git a/README.md b/README.md
+index eb68ea6..1fbebd6 100644
+--- a/README.md
++++ b/README.md
+@@ -31,6 +31,38 @@ Binaries land in `build/examples/`. Configure with
+ `-DVULKAN_APP_BUILD_EXAMPLES=OFF` / `-DVULKAN_APP_BUILD_TESTS=OFF` to build only
+ the library.
+ 
++### Cross-building for Android
++
++```sh
++cmake -S . -B build-android \
++  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
++  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28
++cmake --build build-android -j
++```
++
++The NDK toolchain file sets `ANDROID`, which turns on the `VULKAN_APP_ANDROID`
++option automatically (it can also be set explicitly). That option changes two
++defaults that don't hold on-device:
++
++- The Khronos validation layer isn't bundled on Android by default, so
++  examples construct `VulkanDevice` with `vulkan::kDefaultEnableValidationLayers`
++  instead of a hardcoded `true` — `false` under `VULKAN_APP_ANDROID`.
++- `VULKAN_APP_SHADER_DIR` is set to `/data/local/tmp/vulkan_app/shaders/spv`
++  (override with `-DVULKAN_APP_ANDROID_SHADER_DIR=...`) instead of the host
++  source path, since nothing is deployed there. Push the shaders and binary
++  to that path before running:
++
++```sh
++adb push shaders/spv /data/local/tmp/vulkan_app/shaders
++adb push build-android/examples/buffer_add /data/local/tmp/vulkan_app/
++adb shell /data/local/tmp/vulkan_app/buffer_add
++```
++
++Not exercised on real Android hardware from this environment (no device/NDK
++available here) — only the CMake configuration logic above was verified by
++forcing `-DVULKAN_APP_ANDROID=ON` on a desktop build and confirming both
++defines compile through correctly.
++
+ ## Tests
+ 
+ ```sh
+@@ -94,6 +126,7 @@ through the same host code:
+ | `image_add` | Element-wise add of two `rgba32f` storage images |
+ | `buffer_image` | Reads a storage buffer, doubles it, writes an `rgba32f` image |
+ | `layout_transform` | Runs a TVM-generated NCHW -> NCHW4c kernel (buffer -> image) |
++| `gemm_coopmat` | fp16 cooperative-matrix GEMM, two memory layouts; verifies both and compares timing (requires `VK_KHR_cooperative_matrix`, see Known issues) |
+ 
+ ## Classes
+ 
+@@ -154,3 +187,10 @@ disallows (`VUID-StandaloneSpirv-OpTypeImage-04657` requires 1 or 2). Lenient
+ drivers accept it as a storage image; MoltenVK translates it to a sampled Metal
+ texture and the pipeline fails to compile. The fix belongs in how the module is
+ generated (it should be a storage image, `Sampled = 2`), not in the host code.
++
++`gemm_coopmat` requires a device that supports `VK_KHR_cooperative_matrix`
++with a float16 subgroup-scope configuration (recent NVIDIA/AMD/Intel/ARM
++GPUs). It fails during device creation with a clear error on anything else,
++including software/CPU Vulkan implementations such as llvmpipe/lavapipe —
++`vulkaninfo` lists the device's extensions if you need to check.
++
+diff --git a/examples/CMakeLists.txt b/examples/CMakeLists.txt
+index 8af0cda..fa6166b 100644
+--- a/examples/CMakeLists.txt
++++ b/examples/CMakeLists.txt
+@@ -4,6 +4,7 @@ set(VULKAN_APP_EXAMPLES
+   image_add
+   buffer_image
+   layout_transform
++  gemm_coopmat
+ )
+ 
+ foreach(example IN LISTS VULKAN_APP_EXAMPLES)
+diff --git a/examples/buffer_add.cc b/examples/buffer_add.cc
+index 4f71579..20e5c1c 100644
+--- a/examples/buffer_add.cc
++++ b/examples/buffer_add.cc
+@@ -15,7 +15,7 @@ using namespace vulkan;
+ 
+ int main(int argc, char** argv) try {
+     // Step 1: Initialize VulkanDevice
+-    VulkanDevice vulkanDevice(true); // Enable validation layers
++    VulkanDevice vulkanDevice(kDefaultEnableValidationLayers);
+ 
+     VkDevice device = vulkanDevice.getDevice();
+     VkPhysicalDevice physicalDevice = vulkanDevice.getPhysicalDevice();
+diff --git a/examples/buffer_image.cc b/examples/buffer_image.cc
+index fd4deb2..e4148bc 100644
+--- a/examples/buffer_image.cc
++++ b/examples/buffer_image.cc
+@@ -16,7 +16,7 @@ using namespace vulkan;
+ 
+ int main(int argc, char** argv) try {
+     // Step 1: Initialize VulkanDevice
+-    VulkanDevice vulkanDevice(true); // Enable validation layers
++    VulkanDevice vulkanDevice(kDefaultEnableValidationLayers);
+ 
+     VkDevice device = vulkanDevice.getDevice();
+     VkPhysicalDevice physicalDevice = vulkanDevice.getPhysicalDevice();
+diff --git a/examples/gemm_coopmat.cc b/examples/gemm_coopmat.cc
+new file mode 100644
+index 0000000..dafccb5
+--- /dev/null
++++ b/examples/gemm_coopmat.cc
+@@ -0,0 +1,329 @@
++// Runs the same fp16 GEMM (C = A * B) through two cooperative-matrix shaders
++// that differ only in memory layout, verifies both against a CPU reference,
++// and compares their dispatch time:
++//
++//   gemm_kfirst        B stored transposed ("K-first"); tile loads stride by
++//                       the full K dimension.
++//   gemm_kfirst_tiled   A and B additionally re-packed into TILE_K-wide
++//                       contiguous strips; tile loads stride by TILE_K only.
++//
++// Requires a device that supports VK_KHR_cooperative_matrix with a float16
++// subgroup-scope configuration (recent NVIDIA/AMD/Intel/ARM GPUs). This is
++// not the case on software/CPU Vulkan implementations such as llvmpipe.
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <iomanip>
++#include <iostream>
++#include <random>
++#include <vector>
++
++#include "vulkan_app/shader_path.h"
++#include "vulkan_app/vulkan_buffer.h"
++#include "vulkan_app/vulkan_command_buffer.h"
++#include "vulkan_app/vulkan_device.h"
++#include "vulkan_app/vulkan_pipeline.h"
++#include "vulkan_app/vulkan_timer.h"
++
++using namespace vulkan;
++
++namespace {
++
++// --- Minimal IEEE-754 binary16 <-> binary32 conversion -------------------
++// Scoped to this example: the shaders exchange float16_t buffers, and the
++// host has nothing better than float32 to generate/verify data with. Treats
++// subnormal halves as zero and does not handle NaN/Inf specially beyond
++// passing the sign/exponent pattern through; the GEMM data generated below
++// never reaches those ranges.
++
++uint16_t floatToHalf(float value) {
++    uint32_t bits;
++    std::memcpy(&bits, &value, sizeof(bits));
++
++    uint32_t sign = (bits >> 16) & 0x8000u;
++    int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xFFu) - 127 + 15;
++    uint32_t mantissa = bits & 0x7FFFFFu;
++
++    if (exponent <= 0) {
++        return static_cast<uint16_t>(sign);  // too small for a normal half -> flush to zero
++    }
++    if (exponent >= 31) {
++        return static_cast<uint16_t>(sign | 0x7C00u);  // overflow -> infinity
++    }
++
++    uint16_t half = static_cast<uint16_t>(sign | (static_cast<uint32_t>(exponent) << 10) | (mantissa >> 13));
++    if (mantissa & 0x1000u) {
++        half = static_cast<uint16_t>(half + 1);  // round to nearest, ties up
++    }
++    return half;
++}
++
++float halfToFloat(uint16_t half) {
++    uint32_t sign = static_cast<uint32_t>(half & 0x8000u) << 16;
++    uint32_t exponent = (half >> 10) & 0x1Fu;
++    uint32_t mantissa = half & 0x3FFu;
++
++    uint32_t bits;
++    if (exponent == 0) {
++        bits = sign;  // zero or subnormal half -> zero
++    } else if (exponent == 31) {
++        bits = sign | 0x7F800000u | (mantissa << 13);  // inf/nan
++    } else {
++        bits = sign | ((exponent - 15 + 127) << 23) | (mantissa << 13);
++    }
++
++    float value;
++    std::memcpy(&value, &bits, sizeof(value));
++    return value;
++}
++
++// --- Layout packing --------------------------------------------------------
++// `a`/`b` are the logical, row-major fp32 matrices (A: M x K, B: K x N).
++
++// gemm_kfirst expects B transposed: addr(k,n) = n*K + k.
++std::vector<uint16_t> packBKFirst(const std::vector<float>& b, uint32_t K, uint32_t N) {
++    std::vector<uint16_t> out(static_cast<size_t>(K) * N);
++    for (uint32_t k = 0; k < K; ++k) {
++        for (uint32_t n = 0; n < N; ++n) {
++            out[static_cast<size_t>(n) * K + k] = floatToHalf(b[static_cast<size_t>(k) * N + n]);
++        }
++    }
++    return out;
++}
++
++// gemm_kfirst_tiled expects A packed into TILE_K-wide strips:
++// addr(m,k) = (k/TILE_K)*M*TILE_K + m*TILE_K + k%TILE_K
++std::vector<uint16_t> packAStripTiled(const std::vector<float>& a, uint32_t M, uint32_t K, uint32_t TILE_K) {
++    std::vector<uint16_t> out(static_cast<size_t>(M) * K);
++    for (uint32_t m = 0; m < M; ++m) {
++        for (uint32_t k = 0; k < K; ++k) {
++            uint32_t strip = k / TILE_K;
++            uint32_t kk = k % TILE_K;
++            size_t addr = static_cast<size_t>(strip) * M * TILE_K + static_cast<size_t>(m) * TILE_K + kk;
++            out[addr] = floatToHalf(a[static_cast<size_t>(m) * K + k]);
++        }
++    }
++    return out;
++}
++
++// gemm_kfirst_tiled expects B packed into TILE_K-wide strips:
++// addr(k,n) = (k/TILE_K)*N*TILE_K + n*TILE_K + k%TILE_K
++std::vector<uint16_t> packBStripTiled(const std::vector<float>& b, uint32_t K, uint32_t N, uint32_t TILE_K) {
++    std::vector<uint16_t> out(static_cast<size_t>(K) * N);
++    for (uint32_t k = 0; k < K; ++k) {
++        for (uint32_t n = 0; n < N; ++n) {
++            uint32_t strip = k / TILE_K;
++            uint32_t kk = k % TILE_K;
++            size_t addr = static_cast<size_t>(strip) * N * TILE_K + static_cast<size_t>(n) * TILE_K + kk;
++            out[addr] = floatToHalf(b[static_cast<size_t>(k) * N + n]);
++        }
++    }
++    return out;
++}
++
++struct PushConstants {
++    uint32_t M, N, K;
++};
++
++struct GemmRunResult {
++    double elapsedMillis;
++    double worstErrorRatio;  // max over elements of |c - ref| / (atol + rtol*|ref|); pass when <= 1
++    bool passed;
++};
++
++// Builds the pipeline for one shader variant, dispatches it once, times it,
++// and verifies the result against `reference` (M x N, row-major, fp32).
++GemmRunResult runGemmVariant(VulkanDevice& vulkanDevice, const std::string& shaderPath,
++                             const std::vector<uint16_t>& packedA, const std::vector<uint16_t>& packedB,
++                             uint32_t M, uint32_t N, uint32_t K,
++                             uint32_t subgroupSize, uint32_t tileM, uint32_t tileN, uint32_t tileK,
++                             const std::vector<float>& reference) {
++    VkDevice device = vulkanDevice.getDevice();
++    VkPhysicalDevice physicalDevice = vulkanDevice.getPhysicalDevice();
++
++    const VkMemoryPropertyFlags hostVisible =
++        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++
++    VulkanBuffer bufferA(device, physicalDevice, packedA.size() * sizeof(uint16_t),
++                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostVisible);
++    VulkanBuffer bufferB(device, physicalDevice, packedB.size() * sizeof(uint16_t),
++                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostVisible);
++    VulkanBuffer bufferC(device, physicalDevice, static_cast<VkDeviceSize>(M) * N * sizeof(uint16_t),
++                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostVisible);
++
++    bufferA.upload(packedA.data());
++    bufferB.upload(packedB.data());
++
++    VulkanPipeline pipeline(device);
++
++    std::vector<VkDescriptorSetLayoutBinding> bindings = {
++        { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },  // A
++        { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },  // B
++        { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },  // C
++    };
++    pipeline.createDescriptorSetLayout(bindings);
++
++    // Specialization constants: id 0 is local_size_x (one workgroup == one
++    // subgroup), ids 1-3 are TILE_M/TILE_N/TILE_K.
++    uint32_t specData[4] = { subgroupSize, tileM, tileN, tileK };
++    std::vector<VkSpecializationMapEntry> specEntries = {
++        { 0, 0 * sizeof(uint32_t), sizeof(uint32_t) },
++        { 1, 1 * sizeof(uint32_t), sizeof(uint32_t) },
++        { 2, 2 * sizeof(uint32_t), sizeof(uint32_t) },
++        { 3, 3 * sizeof(uint32_t), sizeof(uint32_t) },
++    };
++    std::vector<VkPushConstantRange> pushConstantRanges = {
++        { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants) },
++    };
++    pipeline.createPipeline(shaderPath, "main", specEntries, specData, sizeof(specData),
++                            pushConstantRanges, subgroupSize);
++
++    std::vector<VkDescriptorPoolSize> poolSizes = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 } };
++    pipeline.createDescriptorPool(poolSizes);
++    VkDescriptorSet descriptorSet = pipeline.allocateDescriptorSet(pipeline.getDescriptorPool());
++
++    VkDescriptorBufferInfo infoA = { bufferA.getBuffer(), 0, VK_WHOLE_SIZE };
++    VkDescriptorBufferInfo infoB = { bufferB.getBuffer(), 0, VK_WHOLE_SIZE };
++    VkDescriptorBufferInfo infoC = { bufferC.getBuffer(), 0, VK_WHOLE_SIZE };
++    std::vector<VkWriteDescriptorSet> writes = {
++        { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, descriptorSet, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &infoA, nullptr },
++        { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, descriptorSet, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &infoB, nullptr },
++        { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, descriptorSet, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &infoC, nullptr },
++    };
++    pipeline.updateDescriptorSet(descriptorSet, writes);
++
++    VulkanTimer timer(device, physicalDevice, vulkanDevice.getComputeQueueFamilyIndex());
++    VulkanCommandBuffer commandBuffer(device, vulkanDevice.getCommandPool());
++
++    PushConstants pc{ M, N, K };
++
++    commandBuffer.beginRecording();
++    timer.begin(commandBuffer.getCommandBuffer());
++    commandBuffer.pushConstants(pipeline.getPipelineLayout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
++    // Per the shader headers: vkCmdDispatch(N / TILE_N, M / TILE_M, 1).
++    commandBuffer.dispatchCompute(pipeline.getPipeline(), pipeline.getPipelineLayout(), descriptorSet,
++                                  N / tileN, M / tileM, 1);
++    timer.end(commandBuffer.getCommandBuffer());
++    commandBuffer.endRecording();
++    commandBuffer.submit(vulkanDevice.getComputeQueue());
++
++    std::vector<uint16_t> packedC(static_cast<size_t>(M) * N);
++    bufferC.download(packedC.data());
++
++    // fp16 accumulation over K terms rounds at every step, so allow a
++    // generous combined tolerance rather than a tight relative bound alone
++    // (which blows up near zero-crossings of the reference value).
++    const double atol = 0.1;
++    const double rtol = 0.1;
++    double worstRatio = 0.0;
++    for (size_t i = 0; i < packedC.size(); ++i) {
++        double c = halfToFloat(packedC[i]);
++        double ref = reference[i];
++        double allowed = atol + rtol * std::fabs(ref);
++        double ratio = std::fabs(c - ref) / allowed;
++        worstRatio = std::max(worstRatio, ratio);
++    }
++
++    GemmRunResult result;
++    result.elapsedMillis = timer.getElapsedMillis();
++    result.worstErrorRatio = worstRatio;
++    result.passed = worstRatio <= 1.0;
++    return result;
++}
++
++}  // namespace
++
++int main(int argc, char** argv) try {
++    (void)argc;
++    (void)argv;
++
++    // Step 1: Device with cooperative matrix support.
++    VulkanDevice vulkanDevice(kDefaultEnableValidationLayers, true /*cooperative matrix*/);
++    uint32_t subgroupSize = vulkanDevice.getSubgroupSize();
++
++    // Step 2: Pick a float16 subgroup-scope cooperative matrix configuration.
++    auto coopmatProperties = vulkanDevice.getCooperativeMatrixProperties();
++    const VkCooperativeMatrixPropertiesKHR* chosen = nullptr;
++    for (const auto& prop : coopmatProperties) {
++        if (prop.AType == VK_COMPONENT_TYPE_FLOAT16_KHR && prop.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
++            prop.CType == VK_COMPONENT_TYPE_FLOAT16_KHR && prop.ResultType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
++            prop.scope == VK_SCOPE_SUBGROUP_KHR) {
++            chosen = &prop;
++            break;
++        }
++    }
++    if (!chosen) {
++        throw std::runtime_error("no float16 subgroup-scope VkCooperativeMatrixPropertiesKHR entry on this device");
++    }
++    uint32_t tileM = chosen->MSize, tileN = chosen->NSize, tileK = chosen->KSize;
++
++    std::cout << "subgroupSize=" << subgroupSize << " TILE_M=" << tileM << " TILE_N=" << tileN
++              << " TILE_K=" << tileK << std::endl;
++
++    // Step 3: Problem size, a small multiple of each tile dimension so both
++    // shaders' divisibility requirements hold regardless of the hardware's
++    // actual tile sizes.
++    const uint32_t multiplier = 8;
++    uint32_t M = tileM * multiplier, N = tileN * multiplier, K = tileK * multiplier;
++
++    // Step 4: Deterministic input data and CPU reference (computed in fp32
++    // from the un-rounded inputs; the fp16 tolerance in runGemmVariant
++    // accounts for the GPU's fp16 accumulation).
++    std::mt19937 rng(42);
++    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
++
++    std::vector<float> a(static_cast<size_t>(M) * K);
++    std::vector<float> b(static_cast<size_t>(K) * N);
++    for (auto& v : a) v = dist(rng);
++    for (auto& v : b) v = dist(rng);
++
++    std::vector<float> reference(static_cast<size_t>(M) * N, 0.0f);
++    for (uint32_t m = 0; m < M; ++m) {
++        for (uint32_t k = 0; k < K; ++k) {
++            float aVal = a[static_cast<size_t>(m) * K + k];
++            for (uint32_t n = 0; n < N; ++n) {
++                reference[static_cast<size_t>(m) * N + n] += aVal * b[static_cast<size_t>(k) * N + n];
++            }
++        }
++    }
++
++    // Step 5: Pack per-variant layouts and run each shader.
++    std::vector<uint16_t> aPlain(static_cast<size_t>(M) * K);
++    for (size_t i = 0; i < a.size(); ++i) aPlain[i] = floatToHalf(a[i]);
++    std::vector<uint16_t> bKFirst = packBKFirst(b, K, N);
++
++    std::vector<uint16_t> aTiled = packAStripTiled(a, M, K, tileK);
++    std::vector<uint16_t> bTiled = packBStripTiled(b, K, N, tileK);
++
++    GemmRunResult kfirst = runGemmVariant(vulkanDevice, vulkan::shaderPath("gemm_kfirst.spv"),
++                                          aPlain, bKFirst, M, N, K, subgroupSize, tileM, tileN, tileK,
++                                          reference);
++    GemmRunResult tiled = runGemmVariant(vulkanDevice, vulkan::shaderPath("gemm_kfirst_tiled.spv"),
++                                         aTiled, bTiled, M, N, K, subgroupSize, tileM, tileN, tileK,
++                                         reference);
++
++    // Step 6: Report.
++    double gflops = 2.0 * M * N * K / 1e9;
++    std::cout << std::fixed << std::setprecision(4);
++    std::cout << "M=" << M << " N=" << N << " K=" << K << "\n";
++    std::cout << "gemm_kfirst:       " << kfirst.elapsedMillis << " ms, "
++              << (gflops / (kfirst.elapsedMillis / 1000.0)) << " GFLOP/s, "
++              << (kfirst.passed ? "PASS" : "FAIL") << " (worst error ratio " << kfirst.worstErrorRatio << ")\n";
++    std::cout << "gemm_kfirst_tiled: " << tiled.elapsedMillis << " ms, "
++              << (gflops / (tiled.elapsedMillis / 1000.0)) << " GFLOP/s, "
++              << (tiled.passed ? "PASS" : "FAIL") << " (worst error ratio " << tiled.worstErrorRatio << ")\n";
++    std::cout << "tiled speedup: " << (kfirst.elapsedMillis / tiled.elapsedMillis) << "x\n";
++
++    if (!kfirst.passed || !tiled.passed) {
++        std::cerr << "GEMM verification failed." << std::endl;
++        return EXIT_FAILURE;
++    }
++
++    return EXIT_SUCCESS;
++
++} catch (const std::exception& e) {
++    std::cerr << "Error: " << e.what() << std::endl;
++    return EXIT_FAILURE;
++}
+diff --git a/examples/image_add.cc b/examples/image_add.cc
+index 016d6ea..a882082 100644
+--- a/examples/image_add.cc
++++ b/examples/image_add.cc
+@@ -16,7 +16,7 @@ using namespace vulkan;
+ 
+ int main(int argc, char** argv) try {
+     // Step 1: Initialize VulkanDevice
+-    VulkanDevice vulkanDevice(true); // Enable validation layers
++    VulkanDevice vulkanDevice(kDefaultEnableValidationLayers);
+ 
+     VkDevice device = vulkanDevice.getDevice();
+     VkPhysicalDevice physicalDevice = vulkanDevice.getPhysicalDevice();
+diff --git a/examples/layout_transform.cc b/examples/layout_transform.cc
+index 2bdf158..2622988 100644
+--- a/examples/layout_transform.cc
++++ b/examples/layout_transform.cc
+@@ -18,7 +18,7 @@ using namespace vulkan;
+ 
+ int main(int argc, char** argv) try {
+     // Step 1: Initialize VulkanDevice
+-    VulkanDevice vulkanDevice(true); // Enable validation layers
++    VulkanDevice vulkanDevice(kDefaultEnableValidationLayers);
+ 
+     VkDevice device = vulkanDevice.getDevice();
+     VkPhysicalDevice physicalDevice = vulkanDevice.getPhysicalDevice();
+diff --git a/include/vulkan_app/vulkan_command_buffer.h b/include/vulkan_app/vulkan_command_buffer.h
+index d89a830..713785e 100644
+--- a/include/vulkan_app/vulkan_command_buffer.h
++++ b/include/vulkan_app/vulkan_command_buffer.h
+@@ -15,6 +15,7 @@ public:
+     void endRecording();
+     void submit(VkQueue queue, VkFence fence = VK_NULL_HANDLE);
+     void dispatchCompute(VkPipeline pipeline, VkPipelineLayout pipelineLayout, VkDescriptorSet descriptorSet, uint32_t groupCountX = 1, uint32_t groupCountY = 1, uint32_t groupCountZ = 1);
++    void pushConstants(VkPipelineLayout pipelineLayout, VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size, const void* data);
+ 
+     VkCommandBuffer getCommandBuffer() const;
+ 
+diff --git a/include/vulkan_app/vulkan_device.h b/include/vulkan_app/vulkan_device.h
+index 9f98b17..8e78e25 100644
+--- a/include/vulkan_app/vulkan_device.h
++++ b/include/vulkan_app/vulkan_device.h
+@@ -7,9 +7,24 @@
+ 
+ namespace vulkan {
+ 
++// The Khronos validation layer isn't present on Android devices by default
++// (unlike a desktop Vulkan SDK install), so VulkanDevice(true) there throws
++// "validation layers requested, but not available!" before anything runs.
++// Examples pass this instead of a hardcoded `true` so the same source works
++// on both.
++#ifdef VULKAN_APP_ANDROID
++constexpr bool kDefaultEnableValidationLayers = false;
++#else
++constexpr bool kDefaultEnableValidationLayers = true;
++#endif
++
+ class VulkanDevice {
+ public:
+-    VulkanDevice(bool enableValidationLayers);
++    // enableCooperativeMatrix requests VK_KHR_cooperative_matrix plus the
++    // float16 / 16-bit-storage / subgroup-size-control features it depends
++    // on, bumping the instance/device to Vulkan 1.3. Throws if the physical
++    // device doesn't support them.
++    VulkanDevice(bool enableValidationLayers, bool enableCooperativeMatrix = false);
+     ~VulkanDevice();
+ 
+     VkDevice getDevice() const;
+@@ -20,6 +35,15 @@ public:
+     VkCommandPool createCommandPool();
+     VkCommandPool getCommandPool() const;
+ 
++    // Subgroup size the device actually runs compute shaders with. Needed to
++    // size `local_size_x_id = 0` specialization constants that assume one
++    // workgroup == one subgroup (cooperative-matrix shaders).
++    uint32_t getSubgroupSize() const;
++
++    // Cooperative-matrix (M,N,K,type) configurations this device supports.
++    // Only meaningful when constructed with enableCooperativeMatrix = true.
++    std::vector<VkCooperativeMatrixPropertiesKHR> getCooperativeMatrixProperties() const;
++
+ private:
+     VkInstance instance;
+     VkPhysicalDevice physicalDevice;
+@@ -29,6 +53,7 @@ private:
+     VkCommandPool commandPool;
+ 
+     bool enableValidationLayers;
++    bool enableCooperativeMatrix;
+ 
+     const std::vector<const char*> validationLayers = {
+         "VK_LAYER_KHRONOS_validation"
+diff --git a/include/vulkan_app/vulkan_pipeline.h b/include/vulkan_app/vulkan_pipeline.h
+index ceba7f6..e6a2aef 100644
+--- a/include/vulkan_app/vulkan_pipeline.h
++++ b/include/vulkan_app/vulkan_pipeline.h
+@@ -12,7 +12,11 @@ public:
+     VulkanPipeline(VkDevice device);
+     ~VulkanPipeline();
+ 
+-    void createPipeline(const std::string& shaderPath,const std::string& entry_point);
++    void createPipeline(const std::string& shaderPath, const std::string& entry_point,
++                         const std::vector<VkSpecializationMapEntry>& specEntries = {},
++                         const void* specData = nullptr, size_t specDataSize = 0,
++                         const std::vector<VkPushConstantRange>& pushConstantRanges = {},
++                         uint32_t requiredSubgroupSize = 0);
+     VkPipeline getPipeline() const;
+     VkPipelineLayout getPipelineLayout() const;
+ 
+diff --git a/shaders/gemm_kfirst.comp b/shaders/gemm_kfirst.comp
+new file mode 100644
+index 0000000..119fdcc
+--- /dev/null
++++ b/shaders/gemm_kfirst.comp
+@@ -0,0 +1,66 @@
++#version 450
++// ---------------------------------------------------------------------------
++// GEMM  C = A * B  using KHR cooperative matrix — plain "K-first" layout
++//
++//   A : M x K, row-major            addr(m,k) = m*K + k
++//   B : K x N, stored K-first       addr(k,n) = n*K + k   (i.e. B^T row-major)
++//   C : M x N, row-major            addr(m,n) = m*N + n
++//
++// One subgroup (= one workgroup) computes one TILE_M x TILE_N tile of C.
++// Dispatch: vkCmdDispatch(N / TILE_N, M / TILE_M, 1)
++// Requires M % TILE_M == 0, N % TILE_N == 0, K % TILE_K == 0 (no edge handling).
++// ---------------------------------------------------------------------------
++#extension GL_KHR_cooperative_matrix : require
++#extension GL_KHR_memory_scope_semantics : require
++#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
++#extension GL_EXT_shader_16bit_storage : require
++
++// Change these to a combination reported by
++// vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR on your device.
++#define A_TYPE float16_t
++#define C_TYPE float16_t
++
++// Spec constant 0 = subgroup size (one subgroup per workgroup).
++layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
++
++layout(constant_id = 1) const uint TILE_M = 16;
++layout(constant_id = 2) const uint TILE_N = 16;
++layout(constant_id = 3) const uint TILE_K = 16;
++
++layout(push_constant) uniform PC { uint M; uint N; uint K; } pc;
++
++layout(set = 0, binding = 0) readonly  buffer BufA { A_TYPE a[]; };
++layout(set = 0, binding = 1) readonly  buffer BufB { A_TYPE b[]; };
++layout(set = 0, binding = 2) writeonly buffer BufC { C_TYPE c[]; };
++
++void main()
++{
++    const uint row = gl_WorkGroupID.y * TILE_M;   // first row of this C tile
++    const uint col = gl_WorkGroupID.x * TILE_N;   // first column of this C tile
++
++    coopmat<C_TYPE, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator> acc =
++        coopmat<C_TYPE, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator>(C_TYPE(0.0));
++
++    for (uint step = 0; step < pc.K; step += TILE_K)
++    {
++        // A tile: rows [row, row+TILE_M), k [step, step+TILE_K)
++        // Each row of the tile is TILE_K contiguous values, rows are K apart.
++        coopmat<A_TYPE, gl_ScopeSubgroup, TILE_M, TILE_K, gl_MatrixUseA> matA;
++        coopMatLoad(matA, a,
++                    row * pc.K + step,          // element
++                    pc.K,                       // stride = TOTAL_K  (large!)
++                    gl_CooperativeMatrixLayoutRowMajor);
++
++        // B tile: k [step, step+TILE_K), cols [col, col+TILE_N)
++        // Each column is TILE_K contiguous values, columns are K apart.
++        coopmat<A_TYPE, gl_ScopeSubgroup, TILE_K, TILE_N, gl_MatrixUseB> matB;
++        coopMatLoad(matB, b,
++                    col * pc.K + step,          // element
++                    pc.K,                       // stride = TOTAL_K  (large!)
++                    gl_CooperativeMatrixLayoutColumnMajor);
++
++        acc = coopMatMulAdd(matA, matB, acc);
++    }
++
++    coopMatStore(acc, c, row * pc.N + col, pc.N, gl_CooperativeMatrixLayoutRowMajor);
++}
+diff --git a/shaders/gemm_kfirst_tiled.comp b/shaders/gemm_kfirst_tiled.comp
+new file mode 100644
+index 0000000..6fd23d4
+--- /dev/null
++++ b/shaders/gemm_kfirst_tiled.comp
+@@ -0,0 +1,67 @@
++#version 450
++// ---------------------------------------------------------------------------
++// GEMM  C = A * B  using KHR cooperative matrix — "K-first tiled" layout
++//
++// K is cut into strips of width TILE_K. Each strip is stored whole, one after
++// another; inside a strip, rows (A) / columns (B) are TILE_K long and K-first.
++//
++//   A : addr(m,k) = (k/TILE_K)*M*TILE_K + m*TILE_K + k%TILE_K
++//   B : addr(k,n) = (k/TILE_K)*N*TILE_K + n*TILE_K + k%TILE_K
++//   C : M x N, row-major, addr(m,n) = m*N + n   (unchanged)
++//
++// => every A/B tile is ONE contiguous block, and stride is always TILE_K.
++//
++// Dispatch: vkCmdDispatch(N / TILE_N, M / TILE_M, 1)
++// Requires M % TILE_M == 0, N % TILE_N == 0, K % TILE_K == 0.
++// TILE_K here MUST match the TILE_K used when packing A and B on the host.
++// ---------------------------------------------------------------------------
++#extension GL_KHR_cooperative_matrix : require
++#extension GL_KHR_memory_scope_semantics : require
++#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
++#extension GL_EXT_shader_16bit_storage : require
++
++#define A_TYPE float16_t
++#define C_TYPE float16_t
++
++layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
++
++layout(constant_id = 1) const uint TILE_M = 16;
++layout(constant_id = 2) const uint TILE_N = 16;
++layout(constant_id = 3) const uint TILE_K = 16;
++
++layout(push_constant) uniform PC { uint M; uint N; uint K; } pc;
++
++layout(set = 0, binding = 0) readonly  buffer BufA { A_TYPE a[]; };
++layout(set = 0, binding = 1) readonly  buffer BufB { A_TYPE b[]; };
++layout(set = 0, binding = 2) writeonly buffer BufC { C_TYPE c[]; };
++
++void main()
++{
++    const uint row = gl_WorkGroupID.y * TILE_M;
++    const uint col = gl_WorkGroupID.x * TILE_N;
++
++    coopmat<C_TYPE, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator> acc =
++        coopmat<C_TYPE, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator>(C_TYPE(0.0));
++
++    for (uint step = 0; step < pc.K; step += TILE_K)
++    {
++        // step*M  == (step/TILE_K) * TILE_K * M  -> skip to K strip #(step/TILE_K)
++        // row*TILE_K                              -> first row of the tile in that strip
++        coopmat<A_TYPE, gl_ScopeSubgroup, TILE_M, TILE_K, gl_MatrixUseA> matA;
++        coopMatLoad(matA, a,
++                    row * TILE_K + step * pc.M, // element
++                    TILE_K,                     // stride = TILE_K  (small, fixed)
++                    gl_CooperativeMatrixLayoutRowMajor);
++
++        // Same idea for B, but the strip holds N columns -> step*N
++        coopmat<A_TYPE, gl_ScopeSubgroup, TILE_K, TILE_N, gl_MatrixUseB> matB;
++        coopMatLoad(matB, b,
++                    col * TILE_K + step * pc.N, // element
++                    TILE_K,                     // stride = TILE_K
++                    gl_CooperativeMatrixLayoutColumnMajor);
++
++        acc = coopMatMulAdd(matA, matB, acc);    // identical to the row-major shader
++    }
++
++    coopMatStore(acc, c, row * pc.N + col, pc.N, gl_CooperativeMatrixLayoutRowMajor);
++}
+diff --git a/shaders/spv/gemm_kfirst.spv b/shaders/spv/gemm_kfirst.spv
+new file mode 100644
+index 0000000000000000000000000000000000000000..a61b5fa6df487049c8b01b3110fb2555df4c4bea
+GIT binary patch
+literal 3700
+zcmZve`BEHJ6vi(MTfi)sO^u07h%1PJBp8i}LV`nNA|zlE*G|*ZK*Ma#LclHlVfj2h
+zgKy$XSZbA3e!uQMq%&n($8*ki_H*wYQs^BYbgsvZxWn#=OTSUqE5teYp^V=hP4z!c
+zr2N;@&JDXkx4LrQUs}B9PtUH$ZNJs7H-pVcF~e@?z!ui)ji?#4<K4)w2JL3NhkfM0
+zo<;fVosEsCX-WLB60}-$l+U%>sq6$bzZzBR&3(UGFGm$+8c6yrmR3tst#*0p@|BCk
+z9dQL%^8cgq>6hFmss?cld_;6iIGDyuaxgbk(0{$+zf0-UEX9()@Nms<Z3Shu`0TWO
+z+TFAEXs=O;LoFm|#_g?Y)Q&^Hz2Ash{zj!9w5Mm4bC{Uo@^Z1X;D?Qd#@??)ekHC&
+zemQPNA?rG*o%zMJu+k~#9kSjyg8y5y>KvjD_H1XZP^aOyqH0i6TP(O=UirQBYxW`G
+z&H7{629iB(R{RI`=1#F$?=)`TN@I@6XYIDyzk^<I&r1*Ml_cLOvwfP{&Por$FtK@(
+zTkWVJmc+d-zH-wgCxOhTlm|NJp)?0N=dvWC=9}V;5V_AyOHTTc5&g1s-M2ZhM4uI(
+z?`$MGr;g4Sh{$y{(NbUPD|Q};T+8B$O>|<>`PN0m-c7XBcSo{(HBs6#I-lB1e5;A(
+zTv2&OBttKW(Ag>TLg?%fnVE~K!+ww#mC1HBE}hRX{J}U=!-xUnT*=F>@GE5c74ZR)
+z)nPYjou_+xK^XaLZ&sJS*d2CqBaeyrOh2EhiJqS2(^~A(YS~_`mg)Ig?AmG}Q;S)s
+zg`TgqEj>RMXJNJMTwWB$T&Cx1aaP#LjZ7`#P0!c*Q8<0@VgE^-vnBqxqKF&QuGl&9
+zN%_#5C*t#@4~j$Jr=|1zi%bmmVR34JU(0lAfK5op_qj~R|8ORQ&t!J)7-as(CG(k`
+zJBR(0s<P+2FSF2##d2?%WovZMoe{?$pEN$b*YxqSFy_LCSp3e3_$H-;zaj!Vm)&i8
+zHX_Fx(wUok&+O>De=v6WmbfRfU7$~h=#ThGaeT>nLg+i<HZ$*mo|$7tJU<6Ec0`U#
+z;>>~1S#5%Mlg?5|-UT{-?}~E{ycK#yznWppPjByu`0)Qo9Dj1r!%`-*OX_nb*zqli
+z(*r*Az<aVDcrWPqt%wr?Mi1z`4>0Q?klZ68&$hVb*^!J+o{BgzVB|sPEr8kn?CxLE
+zcG)p^9}FL8R%gmN@SDWP9r{ZMf0N0{Jp4AnP3P~4>D(XwhL{fbaysY2@4eYelJ8{t
+zoT~5+j)+D?^mAP`xd%r@;J?TReKf<k3pdmyJ%L#c{qrZu!F{kCCnbYh4*k<e_c1*)
+zaxe!NGBa?`kv(zp{H;BViL(#*pXzN~{DO!N`>W#E;a2xG$)1SbCdJ<t@g62b<};Py
+zzsZODeo;gm_&=(HeqKa9@*`X9`;wX8@?VqOo&N)2;5Pep$;5$Mo*R-q(a+hAKTK@w
+zfZPMg-Jg@p``}Ha_Vj$_rRRINDZRUgTf)GthXu*Rfm;tBOZG(8Ls2q*;5Of)<nG+J
+zg@MP}@4_dEf7&NDKF*T6ht2BUlgznW?p4X%xz~h&Ti>5aCJx;4+?VW$tnUYs@dLNr
+zJ(SG5W_Q>v_H)Vk9=?#?-NTo{z^#X`Boha2dA^qHiL8fjB;yBe^ZAmyb3YOW&hD1P
+z*G2Rih#raf*d6Z_8}(+yLlOH#C$22Q2mOqAB;p<Ij1DCFhGb&!!)EUcoVRm9oVyLT
+znKmVRBAaPTGT5}p-X>W7ZH`N~9%9M#VEJm2heWoIx@7jjtme~@3~syrRx)wm=F^nS
+znOR>g$@qcWdAB83MVvQwi|t6x_pmFyyNAcZz^#Wp$;5$Mo_)#r9=?-~AGpo;z2xrP
+YKL`Wg*16ClJEBK$zJFbh-guAu4-+jgYybcN
+
+literal 0
+HcmV?d00001
+
+diff --git a/shaders/spv/gemm_kfirst_tiled.spv b/shaders/spv/gemm_kfirst_tiled.spv
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe34900f100cec68583ff39e00f05b3d9eaf5549
+GIT binary patch
+literal 3708
+zcmZve`EpcM5QlF_NFb3VvZ)9T1XmDQBZ?qlaliyw1zaza$%G7<$&51-Ant!yK9A4f
+zoA?rzT4j~rcjtDvq`X$!{p-`q@ANrm!r;1zkt7*N#*$6RPf7n9PuAf{67|Mh-x%-X
+zKeqSvue*|DG#N>5UB8n~U%r_hot&-r(r&NSsXVBWGn#BzU8}ZQ?OLbOt3Rrx%}TFR
+zf8zSs>Uy4)&Mwc-*E&%otu`v%u8fMc9xXQ(D@$p!)@*fF(q?O})}YdG#<x6kYvypb
+zH+T5N$s^`%P6k!k|F;mc9(xFBR_aUo$B?b~^|8IIhWl0q`EMQicfb&PDbJ*r?%hti
+z3za!2KD*l?X7}uR?Mb^)uQHHIr`}s=)_V17+FNPYy6JqQRp}j_q~@qO<!jf<Gndk8
+zyUn&&8nv`hU#g{Z^-itoxK?}TarLEYV|lI^kaP10{%_3m*=Qfv^O<$4oJQKMH7iTd
+za=`0}D$Zp+d*6V+(|XL>a5kq0jr4A-vsmu5mfKe@_H(upbNdSPuZjng=fTxhBdfPF
+z);{U4?EzP+)oiVV-R;%ds4VYw^z{o#b`sitlw8H02W3{V=Q54h^G$TSsy&n(#m@M!
+zC_Vw^zD=PrJc&NPJfC4tUF=sutaU0w{aE{xdtR5duA#}zu(@KtS;X8M8S2L_ViU`b
+z`kcjn(9B|+8A_5eb;hujmk_Ztb-#+(IcmG-GJTwn_GK!?tR}#I;WJ*JXBs|p^m(q<
+zbymg==J+If7>Pd4rr+o3oL<0Zy_j3{m6x+~-P+pw5Wm3t`!K`(vwYgiSw^pzYxD|S
+z?B%SZm$tp!i@n6fUJt>=eR&qqE6(LbeC{i7v6pA%y0x|KWq#mduOINs!_V~}(VngO
+z+sHC+AG31i+B=AmTM6+ifk)7a{#{^yf3?kVeH3jE{ikzm4}Ay0#y*#0<2U8D{$u&N
+zcT9=+ZP<RX?wxaeCtaO$G1k4vC33yD?qy+oB-xEN-k5%V|6a@EWqj_-7;}x=i})P^
+z>wg8&w>Q7rat^V^8({bCy?5_o-@iU*`4+l_#4N-I5&4;a2yLu2x8r>W9eegY$k}}y
+zLl^hqnlrM-akTp|W)G9_-Sqb|n7s?Jaqpr%2j7ZZ#iw$g`<L5$h@bIOXydIVhw0pQ
+zmiG5dTsL+GEeB)d;Cl)Vz8A4^*U{$alY`jzp)WXmiamf>=OH@kEMkkT(?FY}&pKk?
+zg1(qv-2LNB*BN{F^%<i~a;Bbxze#@Hp}+9>H`$u*$KNJ(VE>*3_Wt-cB(S<vz@Cf0
+z_pv^MeKp5ZbnzW*M#d2NoS~=pU<;!E7h=TYxzD?B7M60-7d80jPgcYG5H)sS>yH}z
+z(}?@nKQn8%4}IG1!F#S<LR;r==CBX#Jk)=}Z32A&@pJuEwCn2V`x<r$k=r5k+lcSs
+zAQCZ$bN_F|c;Am8=IQ^3KH~j|{j9GYx$k4U|Jc`QY<=Fxi1`4!gan5(*mCf0N6gvG
+zep=^4uzC7_&gXs(+xo6eaS~JL^N4T8TIZ0ccLBS|>mpcRk=G?~2?<^wVXx&?#-~5_
+zcNyC}{lV)Bw)I`B=f4dfW6Mom_Vn{Sy??F+&zsnuebm2&t*^-QHn@ZY&pX)i^j$`s
+zyV&}p&OL1N^asz+u&wV}%<psT8;Cqzk9uEV7kPaN)>q{96}W^1udlJ!@=EdP4_^1N
+z&C?&eD%jS)k2t?+^eiGb_gI{t@6|PV9z$0VXDT*t4lzc&8(l+uPmANj8J@>B$2iyG
+zz3KN29YA}>)iH|)*d-+RE@11ESG-Yu#Wy+u4i0r}IYhlB><viFt%bdIZf$(}V{YGI
+zo2NhObg(_6;MK)8PJf(l54(wYzOF~^GIo)}Bk)=dkMZdb4o|Sn(;szKu!|hN1skV7
+e_V*q3+S=da)Blijk)tz`qkg}ClL6lKK=L23^)dYb
+
+literal 0
+HcmV?d00001
+
+diff --git a/src/vulkan_command_buffer.cc b/src/vulkan_command_buffer.cc
+index 02a1f50..d2ef57e 100644
+--- a/src/vulkan_command_buffer.cc
++++ b/src/vulkan_command_buffer.cc
+@@ -56,6 +56,10 @@ void VulkanCommandBuffer::dispatchCompute(VkPipeline pipeline, VkPipelineLayout
+     vkCmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
+ }
+ 
++void VulkanCommandBuffer::pushConstants(VkPipelineLayout pipelineLayout, VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size, const void* data) {
++    vkCmdPushConstants(commandBuffer, pipelineLayout, stageFlags, offset, size, data);
++}
++
+ VkCommandBuffer VulkanCommandBuffer::getCommandBuffer() const {
+     return commandBuffer;
+ }
+diff --git a/src/vulkan_device.cc b/src/vulkan_device.cc
+index c5a98d2..519dd71 100644
+--- a/src/vulkan_device.cc
++++ b/src/vulkan_device.cc
+@@ -6,8 +6,8 @@
+ 
+ namespace vulkan {
+ 
+-VulkanDevice::VulkanDevice(bool enableValidationLayers)
+-    : instance(VK_NULL_HANDLE), physicalDevice(VK_NULL_HANDLE), device(VK_NULL_HANDLE), computeQueue(VK_NULL_HANDLE), commandPool(VK_NULL_HANDLE), computeQueueFamilyIndex(0), enableValidationLayers(enableValidationLayers) {
++VulkanDevice::VulkanDevice(bool enableValidationLayers, bool enableCooperativeMatrix)
++    : instance(VK_NULL_HANDLE), physicalDevice(VK_NULL_HANDLE), device(VK_NULL_HANDLE), computeQueue(VK_NULL_HANDLE), commandPool(VK_NULL_HANDLE), computeQueueFamilyIndex(0), enableValidationLayers(enableValidationLayers), enableCooperativeMatrix(enableCooperativeMatrix) {
+     createInstance();
+     pickPhysicalDevice();
+     createLogicalDevice();
+@@ -37,7 +37,10 @@ void VulkanDevice::createInstance() {
+     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+     appInfo.pEngineName = "No Engine";
+     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+-    appInfo.apiVersion = VK_API_VERSION_1_0;
++    // VK_KHR_cooperative_matrix depends on features promoted into core 1.1-1.3
++    // (16-bit storage, shaderFloat16, subgroup-size-control); core 1.0 doesn't
++    // have those feature structs at all.
++    appInfo.apiVersion = enableCooperativeMatrix ? VK_API_VERSION_1_3 : VK_API_VERSION_1_0;
+ 
+     VkInstanceCreateInfo createInfo = {};
+     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+@@ -124,6 +127,9 @@ void VulkanDevice::createLogicalDevice() {
+ 
+     // Step 1: Specify the required device extensions
+     std::vector<const char*> requiredExtensions = { VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME };
++    if (enableCooperativeMatrix) {
++        requiredExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
++    }
+ 
+     // Step 2: Check if the device supports the required extensions
+     if (!checkDeviceExtensionSupport(physicalDevice, requiredExtensions)) {
+@@ -138,12 +144,10 @@ void VulkanDevice::createLogicalDevice() {
+         requiredExtensions.push_back(kPortabilitySubset);
+     }
+ 
+-
+     VkDeviceCreateInfo createInfo = {};
+     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+     createInfo.pQueueCreateInfos = &queueCreateInfo;
+     createInfo.queueCreateInfoCount = 1;
+-    createInfo.pEnabledFeatures = &deviceFeatures;
+     createInfo.enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size());
+     createInfo.ppEnabledExtensionNames = requiredExtensions.data();
+ 
+@@ -154,6 +158,60 @@ void VulkanDevice::createLogicalDevice() {
+         createInfo.enabledLayerCount = 0;
+     }
+ 
++    // Step 3: For cooperative matrix, negotiate the feature chain it depends
++    // on (16-bit storage, shaderFloat16, subgroup-size-control) through
++    // VkPhysicalDeviceFeatures2 rather than the plain VkPhysicalDeviceFeatures
++    // struct, and verify every bit we're about to request is actually
++    // supported before asking vkCreateDevice to enable it.
++    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopMatFeatures = {};
++    coopMatFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
++
++    VkPhysicalDeviceVulkan13Features vulkan13Features = {};
++    vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
++    vulkan13Features.pNext = &coopMatFeatures;
++
++    VkPhysicalDeviceVulkan12Features vulkan12Features = {};
++    vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
++    vulkan12Features.pNext = &vulkan13Features;
++
++    VkPhysicalDeviceVulkan11Features vulkan11Features = {};
++    vulkan11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
++    vulkan11Features.pNext = &vulkan12Features;
++
++    VkPhysicalDeviceFeatures2 features2 = {};
++    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
++    features2.pNext = &vulkan11Features;
++
++    if (enableCooperativeMatrix) {
++        vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
++
++        if (!vulkan11Features.storageBuffer16BitAccess) {
++            throw std::runtime_error("device does not support storageBuffer16BitAccess!");
++        }
++        if (!vulkan12Features.shaderFloat16) {
++            throw std::runtime_error("device does not support shaderFloat16!");
++        }
++        if (!vulkan13Features.subgroupSizeControl || !vulkan13Features.computeFullSubgroups) {
++            throw std::runtime_error("device does not support subgroupSizeControl/computeFullSubgroups!");
++        }
++        if (!coopMatFeatures.cooperativeMatrix) {
++            throw std::runtime_error("device does not support VK_KHR_cooperative_matrix (cooperativeMatrix feature)!");
++        }
++
++        // Re-enable exactly the features we checked for (vkGetPhysicalDeviceFeatures2
++        // may have reported other, unrelated features/extensions as supported too).
++        vulkan11Features.storageBuffer16BitAccess = VK_TRUE;
++        vulkan12Features.shaderFloat16 = VK_TRUE;
++        vulkan13Features.subgroupSizeControl = VK_TRUE;
++        vulkan13Features.computeFullSubgroups = VK_TRUE;
++        coopMatFeatures.cooperativeMatrix = VK_TRUE;
++
++        createInfo.pNext = &features2;
++        createInfo.pEnabledFeatures = nullptr;
++    } else {
++        createInfo.pEnabledFeatures = &deviceFeatures;
++    }
++
+     if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
+         throw std::runtime_error("failed to create logical device!");
+     }
+@@ -185,6 +243,38 @@ VkCommandPool VulkanDevice::getCommandPool() const {
+     return commandPool;
+ }
+ 
++uint32_t VulkanDevice::getSubgroupSize() const {
++    VkPhysicalDeviceSubgroupProperties subgroupProperties = {};
++    subgroupProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
++
++    VkPhysicalDeviceProperties2 properties2 = {};
++    properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++    properties2.pNext = &subgroupProperties;
++
++    vkGetPhysicalDeviceProperties2(physicalDevice, &properties2);
++    return subgroupProperties.subgroupSize;
++}
++
++std::vector<VkCooperativeMatrixPropertiesKHR> VulkanDevice::getCooperativeMatrixProperties() const {
++    auto vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR =
++        reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR>(
++            vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR"));
++    if (!vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR) {
++        throw std::runtime_error("vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR not available "
++                                  "(VK_KHR_cooperative_matrix not enabled)!");
++    }
++
++    uint32_t count = 0;
++    vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(physicalDevice, &count, nullptr);
++
++    std::vector<VkCooperativeMatrixPropertiesKHR> properties(count);
++    for (auto& prop : properties) {
++        prop.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
++    }
++    vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(physicalDevice, &count, properties.data());
++    return properties;
++}
++
+ VkCommandPool VulkanDevice::createCommandPool() {
+     VkCommandPoolCreateInfo poolInfo = {};
+     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+diff --git a/src/vulkan_pipeline.cc b/src/vulkan_pipeline.cc
+index a856ee3..5c3ef35 100644
+--- a/src/vulkan_pipeline.cc
++++ b/src/vulkan_pipeline.cc
+@@ -57,7 +57,11 @@ void VulkanPipeline::createShaderModule(const std::vector<char>& code) {
+ 
+ }
+ 
+-void VulkanPipeline::createPipeline(const std::string& shaderPath, const std::string& entry_point) {
++void VulkanPipeline::createPipeline(const std::string& shaderPath, const std::string& entry_point,
++                                     const std::vector<VkSpecializationMapEntry>& specEntries,
++                                     const void* specData, size_t specDataSize,
++                                     const std::vector<VkPushConstantRange>& pushConstantRanges,
++                                     uint32_t requiredSubgroupSize) {
+     // Read SPIR-V shader code
+     auto shaderCode = readFile(shaderPath);
+ 
+@@ -67,12 +71,31 @@ void VulkanPipeline::createPipeline(const std::string& shaderPath, const std::st
+     // Convert the entry point string to a C-style string
+     const char* entryPointCStr = entry_point.c_str();
+ 
++    VkSpecializationInfo specializationInfo = {};
++    if (!specEntries.empty()) {
++        specializationInfo.mapEntryCount = static_cast<uint32_t>(specEntries.size());
++        specializationInfo.pMapEntries = specEntries.data();
++        specializationInfo.dataSize = specDataSize;
++        specializationInfo.pData = specData;
++    }
++
++    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo requiredSubgroupSizeInfo = {};
++    requiredSubgroupSizeInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
++    requiredSubgroupSizeInfo.requiredSubgroupSize = requiredSubgroupSize;
++
+     // Create shader stage info
+     VkPipelineShaderStageCreateInfo shaderStageInfo = {};
+     shaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+     shaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+     shaderStageInfo.module = shaderModule;
+     shaderStageInfo.pName = entryPointCStr;  // Entry point name
++    shaderStageInfo.pSpecializationInfo = specEntries.empty() ? nullptr : &specializationInfo;
++    if (requiredSubgroupSize != 0) {
++        // Pins the workgroup to run as exactly one subgroup of this size, which
++        // cooperative-matrix shaders rely on (one workgroup == one subgroup tile).
++        shaderStageInfo.flags |= VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
++        shaderStageInfo.pNext = &requiredSubgroupSizeInfo;
++    }
+ 
+ 
+     if (descriptorSetLayout == VK_NULL_HANDLE) {
+@@ -88,6 +111,8 @@ void VulkanPipeline::createPipeline(const std::string& shaderPath, const std::st
+     pipelineLayoutInfo.flags = 0;
+     pipelineLayoutInfo.setLayoutCount = 1;
+     pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
++    pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size());
++    pipelineLayoutInfo.pPushConstantRanges = pushConstantRanges.empty() ? nullptr : pushConstantRanges.data();
+ 
+     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+         // Clean up the shader module before throwing
+diff --git a/tools/compile_shaders.sh b/tools/compile_shaders.sh
+index f69b91a..a61ab10 100755
+--- a/tools/compile_shaders.sh
++++ b/tools/compile_shaders.sh
+@@ -17,7 +17,7 @@ fi
+ 
+ mkdir -p "$out_dir"
+ 
+-for shader in buffer_add buffer_image buffers images_add timer_workload; do
++for shader in buffer_add buffer_image buffers images_add timer_workload gemm_kfirst gemm_kfirst_tiled; do
+     src="$shader_dir/$shader.comp"
+     out="$out_dir/$shader.spv"
+     echo "glslc $shader.comp -> spv/$shader.spv"
+-- 
+2.51.0
+

@@ -16,7 +16,7 @@ using namespace vulkan;
 
 int main(int argc, char** argv) try {
     // Step 1: Initialize VulkanDevice
-    VulkanDevice vulkanDevice(true); // Enable validation layers
+    VulkanDevice vulkanDevice(kDefaultEnableValidationLayers);
 
     VkDevice device = vulkanDevice.getDevice();
     VkPhysicalDevice physicalDevice = vulkanDevice.getPhysicalDevice();

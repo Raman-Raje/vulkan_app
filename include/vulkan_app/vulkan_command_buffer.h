@@ -15,6 +15,7 @@ public:
     void endRecording();
     void submit(VkQueue queue, VkFence fence = VK_NULL_HANDLE);
     void dispatchCompute(VkPipeline pipeline, VkPipelineLayout pipelineLayout, VkDescriptorSet descriptorSet, uint32_t groupCountX = 1, uint32_t groupCountY = 1, uint32_t groupCountZ = 1);
+    void pushConstants(VkPipelineLayout pipelineLayout, VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size, const void* data);
 
     VkCommandBuffer getCommandBuffer() const;
 

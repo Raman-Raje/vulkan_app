@@ -1,0 +1,67 @@
+#version 450
+// ---------------------------------------------------------------------------
+// GEMM  C = A * B  using KHR cooperative matrix — "K-first tiled" layout
+//
+// K is cut into strips of width TILE_K. Each strip is stored whole, one after
+// another; inside a strip, rows (A) / columns (B) are TILE_K long and K-first.
+//
+//   A : addr(m,k) = (k/TILE_K)*M*TILE_K + m*TILE_K + k%TILE_K
+//   B : addr(k,n) = (k/TILE_K)*N*TILE_K + n*TILE_K + k%TILE_K
+//   C : M x N, row-major, addr(m,n) = m*N + n   (unchanged)
+//
+// => every A/B tile is ONE contiguous block, and stride is always TILE_K.
+//
+// Dispatch: vkCmdDispatch(N / TILE_N, M / TILE_M, 1)
+// Requires M % TILE_M == 0, N % TILE_N == 0, K % TILE_K == 0.
+// TILE_K here MUST match the TILE_K used when packing A and B on the host.
+// ---------------------------------------------------------------------------
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+#define A_TYPE float16_t
+#define C_TYPE float16_t
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = 1) const uint TILE_M = 16;
+layout(constant_id = 2) const uint TILE_N = 16;
+layout(constant_id = 3) const uint TILE_K = 16;
+
+layout(push_constant) uniform PC { uint M; uint N; uint K; } pc;
+
+layout(set = 0, binding = 0) readonly  buffer BufA { A_TYPE a[]; };
+layout(set = 0, binding = 1) readonly  buffer BufB { A_TYPE b[]; };
+layout(set = 0, binding = 2) writeonly buffer BufC { C_TYPE c[]; };
+
+void main()
+{
+    const uint row = gl_WorkGroupID.y * TILE_M;
+    const uint col = gl_WorkGroupID.x * TILE_N;
+
+    coopmat<C_TYPE, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator> acc =
+        coopmat<C_TYPE, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator>(C_TYPE(0.0));
+
+    for (uint step = 0; step < pc.K; step += TILE_K)
+    {
+        // step*M  == (step/TILE_K) * TILE_K * M  -> skip to K strip #(step/TILE_K)
+        // row*TILE_K                              -> first row of the tile in that strip
+        coopmat<A_TYPE, gl_ScopeSubgroup, TILE_M, TILE_K, gl_MatrixUseA> matA;
+        coopMatLoad(matA, a,
+                    row * TILE_K + step * pc.M, // element
+                    TILE_K,                     // stride = TILE_K  (small, fixed)
+                    gl_CooperativeMatrixLayoutRowMajor);
+
+        // Same idea for B, but the strip holds N columns -> step*N
+        coopmat<A_TYPE, gl_ScopeSubgroup, TILE_K, TILE_N, gl_MatrixUseB> matB;
+        coopMatLoad(matB, b,
+                    col * TILE_K + step * pc.N, // element
+                    TILE_K,                     // stride = TILE_K
+                    gl_CooperativeMatrixLayoutColumnMajor);
+
+        acc = coopMatMulAdd(matA, matB, acc);    // identical to the row-major shader
+    }
+
+    coopMatStore(acc, c, row * pc.N + col, pc.N, gl_CooperativeMatrixLayoutRowMajor);
+}

@@ -17,7 +17,7 @@ fi
 
 mkdir -p "$out_dir"
 
-for shader in buffer_add buffer_image buffers images_add timer_workload; do
+for shader in buffer_add buffer_image buffers images_add timer_workload gemm_kfirst gemm_kfirst_tiled; do
     src="$shader_dir/$shader.comp"
     out="$out_dir/$shader.spv"
     echo "glslc $shader.comp -> spv/$shader.spv"

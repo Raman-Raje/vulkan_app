@@ -6,8 +6,8 @@
 
 namespace vulkan {
 
-VulkanDevice::VulkanDevice(bool enableValidationLayers)
-    : instance(VK_NULL_HANDLE), physicalDevice(VK_NULL_HANDLE), device(VK_NULL_HANDLE), computeQueue(VK_NULL_HANDLE), commandPool(VK_NULL_HANDLE), computeQueueFamilyIndex(0), enableValidationLayers(enableValidationLayers) {
+VulkanDevice::VulkanDevice(bool enableValidationLayers, bool enableCooperativeMatrix)
+    : instance(VK_NULL_HANDLE), physicalDevice(VK_NULL_HANDLE), device(VK_NULL_HANDLE), computeQueue(VK_NULL_HANDLE), commandPool(VK_NULL_HANDLE), computeQueueFamilyIndex(0), enableValidationLayers(enableValidationLayers), enableCooperativeMatrix(enableCooperativeMatrix) {
     createInstance();
     pickPhysicalDevice();
     createLogicalDevice();
@@ -37,7 +37,10 @@ void VulkanDevice::createInstance() {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "No Engine";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_0;
+    // VK_KHR_cooperative_matrix depends on features promoted into core 1.1-1.3
+    // (16-bit storage, shaderFloat16, subgroup-size-control); core 1.0 doesn't
+    // have those feature structs at all.
+    appInfo.apiVersion = enableCooperativeMatrix ? VK_API_VERSION_1_3 : VK_API_VERSION_1_0;
 
     VkInstanceCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -124,6 +127,9 @@ void VulkanDevice::createLogicalDevice() {
 
     // Step 1: Specify the required device extensions
     std::vector<const char*> requiredExtensions = { VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME };
+    if (enableCooperativeMatrix) {
+        requiredExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+    }
 
     // Step 2: Check if the device supports the required extensions
     if (!checkDeviceExtensionSupport(physicalDevice, requiredExtensions)) {
@@ -138,12 +144,10 @@ void VulkanDevice::createLogicalDevice() {
         requiredExtensions.push_back(kPortabilitySubset);
     }
 
-
     VkDeviceCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     createInfo.pQueueCreateInfos = &queueCreateInfo;
     createInfo.queueCreateInfoCount = 1;
-    createInfo.pEnabledFeatures = &deviceFeatures;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size());
     createInfo.ppEnabledExtensionNames = requiredExtensions.data();
 
@@ -152,6 +156,60 @@ void VulkanDevice::createLogicalDevice() {
         createInfo.ppEnabledLayerNames = validationLayers.data();
     } else {
         createInfo.enabledLayerCount = 0;
+    }
+
+    // Step 3: For cooperative matrix, negotiate the feature chain it depends
+    // on (16-bit storage, shaderFloat16, subgroup-size-control) through
+    // VkPhysicalDeviceFeatures2 rather than the plain VkPhysicalDeviceFeatures
+    // struct, and verify every bit we're about to request is actually
+    // supported before asking vkCreateDevice to enable it.
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopMatFeatures = {};
+    coopMatFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+
+    VkPhysicalDeviceVulkan13Features vulkan13Features = {};
+    vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    vulkan13Features.pNext = &coopMatFeatures;
+
+    VkPhysicalDeviceVulkan12Features vulkan12Features = {};
+    vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    vulkan12Features.pNext = &vulkan13Features;
+
+    VkPhysicalDeviceVulkan11Features vulkan11Features = {};
+    vulkan11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    vulkan11Features.pNext = &vulkan12Features;
+
+    VkPhysicalDeviceFeatures2 features2 = {};
+    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.pNext = &vulkan11Features;
+
+    if (enableCooperativeMatrix) {
+        vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+
+        if (!vulkan11Features.storageBuffer16BitAccess) {
+            throw std::runtime_error("device does not support storageBuffer16BitAccess!");
+        }
+        if (!vulkan12Features.shaderFloat16) {
+            throw std::runtime_error("device does not support shaderFloat16!");
+        }
+        if (!vulkan13Features.subgroupSizeControl || !vulkan13Features.computeFullSubgroups) {
+            throw std::runtime_error("device does not support subgroupSizeControl/computeFullSubgroups!");
+        }
+        if (!coopMatFeatures.cooperativeMatrix) {
+            throw std::runtime_error("device does not support VK_KHR_cooperative_matrix (cooperativeMatrix feature)!");
+        }
+
+        // Re-enable exactly the features we checked for (vkGetPhysicalDeviceFeatures2
+        // may have reported other, unrelated features/extensions as supported too).
+        vulkan11Features.storageBuffer16BitAccess = VK_TRUE;
+        vulkan12Features.shaderFloat16 = VK_TRUE;
+        vulkan13Features.subgroupSizeControl = VK_TRUE;
+        vulkan13Features.computeFullSubgroups = VK_TRUE;
+        coopMatFeatures.cooperativeMatrix = VK_TRUE;
+
+        createInfo.pNext = &features2;
+        createInfo.pEnabledFeatures = nullptr;
+    } else {
+        createInfo.pEnabledFeatures = &deviceFeatures;
     }
 
     if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
@@ -183,6 +241,38 @@ uint32_t VulkanDevice::getComputeQueueFamilyIndex() const {
 
 VkCommandPool VulkanDevice::getCommandPool() const {
     return commandPool;
+}
+
+uint32_t VulkanDevice::getSubgroupSize() const {
+    VkPhysicalDeviceSubgroupProperties subgroupProperties = {};
+    subgroupProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+
+    VkPhysicalDeviceProperties2 properties2 = {};
+    properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    properties2.pNext = &subgroupProperties;
+
+    vkGetPhysicalDeviceProperties2(physicalDevice, &properties2);
+    return subgroupProperties.subgroupSize;
+}
+
+std::vector<VkCooperativeMatrixPropertiesKHR> VulkanDevice::getCooperativeMatrixProperties() const {
+    auto vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR =
+        reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR>(
+            vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR"));
+    if (!vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR) {
+        throw std::runtime_error("vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR not available "
+                                  "(VK_KHR_cooperative_matrix not enabled)!");
+    }
+
+    uint32_t count = 0;
+    vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(physicalDevice, &count, nullptr);
+
+    std::vector<VkCooperativeMatrixPropertiesKHR> properties(count);
+    for (auto& prop : properties) {
+        prop.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+    }
+    vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(physicalDevice, &count, properties.data());
+    return properties;
 }
 
 VkCommandPool VulkanDevice::createCommandPool() {

@@ -31,6 +31,38 @@ Binaries land in `build/examples/`. Configure with
 `-DVULKAN_APP_BUILD_EXAMPLES=OFF` / `-DVULKAN_APP_BUILD_TESTS=OFF` to build only
 the library.
 
+### Cross-building for Android
+
+```sh
+cmake -S . -B build-android \
+  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28
+cmake --build build-android -j
+```
+
+The NDK toolchain file sets `ANDROID`, which turns on the `VULKAN_APP_ANDROID`
+option automatically (it can also be set explicitly). That option changes two
+defaults that don't hold on-device:
+
+- The Khronos validation layer isn't bundled on Android by default, so
+  examples construct `VulkanDevice` with `vulkan::kDefaultEnableValidationLayers`
+  instead of a hardcoded `true` — `false` under `VULKAN_APP_ANDROID`.
+- `VULKAN_APP_SHADER_DIR` is set to `/data/local/tmp/vulkan_app/shaders/spv`
+  (override with `-DVULKAN_APP_ANDROID_SHADER_DIR=...`) instead of the host
+  source path, since nothing is deployed there. Push the shaders and binary
+  to that path before running:
+
+```sh
+adb push shaders/spv /data/local/tmp/vulkan_app/shaders
+adb push build-android/examples/buffer_add /data/local/tmp/vulkan_app/
+adb shell /data/local/tmp/vulkan_app/buffer_add
+```
+
+Not exercised on real Android hardware from this environment (no device/NDK
+available here) — only the CMake configuration logic above was verified by
+forcing `-DVULKAN_APP_ANDROID=ON` on a desktop build and confirming both
+defines compile through correctly.
+
 ## Tests
 
 ```sh
@@ -94,6 +126,7 @@ through the same host code:
 | `image_add` | Element-wise add of two `rgba32f` storage images |
 | `buffer_image` | Reads a storage buffer, doubles it, writes an `rgba32f` image |
 | `layout_transform` | Runs a TVM-generated NCHW -> NCHW4c kernel (buffer -> image) |
+| `gemm_coopmat` | fp16 cooperative-matrix GEMM, two memory layouts; verifies both and compares timing (requires `VK_KHR_cooperative_matrix`, see Known issues) |
 
 ## Classes
 
@@ -154,3 +187,10 @@ disallows (`VUID-StandaloneSpirv-OpTypeImage-04657` requires 1 or 2). Lenient
 drivers accept it as a storage image; MoltenVK translates it to a sampled Metal
 texture and the pipeline fails to compile. The fix belongs in how the module is
 generated (it should be a storage image, `Sampled = 2`), not in the host code.
+
+`gemm_coopmat` requires a device that supports `VK_KHR_cooperative_matrix`
+with a float16 subgroup-scope configuration (recent NVIDIA/AMD/Intel/ARM
+GPUs). It fails during device creation with a clear error on anything else,
+including software/CPU Vulkan implementations such as llvmpipe/lavapipe —
+`vulkaninfo` lists the device's extensions if you need to check.
+

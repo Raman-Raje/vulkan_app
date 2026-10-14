@@ -57,7 +57,11 @@ void VulkanPipeline::createShaderModule(const std::vector<char>& code) {
 
 }
 
-void VulkanPipeline::createPipeline(const std::string& shaderPath, const std::string& entry_point) {
+void VulkanPipeline::createPipeline(const std::string& shaderPath, const std::string& entry_point,
+                                     const std::vector<VkSpecializationMapEntry>& specEntries,
+                                     const void* specData, size_t specDataSize,
+                                     const std::vector<VkPushConstantRange>& pushConstantRanges,
+                                     uint32_t requiredSubgroupSize) {
     // Read SPIR-V shader code
     auto shaderCode = readFile(shaderPath);
 
@@ -67,12 +71,31 @@ void VulkanPipeline::createPipeline(const std::string& shaderPath, const std::st
     // Convert the entry point string to a C-style string
     const char* entryPointCStr = entry_point.c_str();
 
+    VkSpecializationInfo specializationInfo = {};
+    if (!specEntries.empty()) {
+        specializationInfo.mapEntryCount = static_cast<uint32_t>(specEntries.size());
+        specializationInfo.pMapEntries = specEntries.data();
+        specializationInfo.dataSize = specDataSize;
+        specializationInfo.pData = specData;
+    }
+
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo requiredSubgroupSizeInfo = {};
+    requiredSubgroupSizeInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+    requiredSubgroupSizeInfo.requiredSubgroupSize = requiredSubgroupSize;
+
     // Create shader stage info
     VkPipelineShaderStageCreateInfo shaderStageInfo = {};
     shaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     shaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     shaderStageInfo.module = shaderModule;
     shaderStageInfo.pName = entryPointCStr;  // Entry point name
+    shaderStageInfo.pSpecializationInfo = specEntries.empty() ? nullptr : &specializationInfo;
+    if (requiredSubgroupSize != 0) {
+        // Pins the workgroup to run as exactly one subgroup of this size, which
+        // cooperative-matrix shaders rely on (one workgroup == one subgroup tile).
+        shaderStageInfo.flags |= VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
+        shaderStageInfo.pNext = &requiredSubgroupSizeInfo;
+    }
 
 
     if (descriptorSetLayout == VK_NULL_HANDLE) {
@@ -88,6 +111,8 @@ void VulkanPipeline::createPipeline(const std::string& shaderPath, const std::st
     pipelineLayoutInfo.flags = 0;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size());
+    pipelineLayoutInfo.pPushConstantRanges = pushConstantRanges.empty() ? nullptr : pushConstantRanges.data();
 
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
         // Clean up the shader module before throwing

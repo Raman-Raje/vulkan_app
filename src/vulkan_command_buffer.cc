@@ -56,6 +56,10 @@ void VulkanCommandBuffer::dispatchCompute(VkPipeline pipeline, VkPipelineLayout 
     vkCmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
 }
 
+void VulkanCommandBuffer::pushConstants(VkPipelineLayout pipelineLayout, VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size, const void* data) {
+    vkCmdPushConstants(commandBuffer, pipelineLayout, stageFlags, offset, size, data);
+}
+
 VkCommandBuffer VulkanCommandBuffer::getCommandBuffer() const {
     return commandBuffer;
 }
